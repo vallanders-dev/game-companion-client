@@ -1,0 +1,52 @@
+[
+  {
+    "canonical_game": "Minecraft",
+    "process_names": ["Minecraft.Windows.exe"],
+    "window_title_substrings": ["Minecraft"]
+  },
+  {
+    "canonical_game": "Cyberpunk 2077",
+    "process_names": ["Cyberpunk2077.exe"],
+    "window_title_substrings": ["Cyberpunk 2077"]
+  },
+  {
+    "canonical_game": "The Witcher 3: Wild Hunt",
+    "process_names": ["witcher3.exe"],
+    "window_title_substrings": ["The Witcher 3"]
+  },
+  {
+    "canonical_game": "Elden Ring",
+    "process_names": ["eldenring.exe"],
+    "window_title_substrings": ["ELDEN RING"]
+  },
+  {
+    "canonical_game": "Red Dead Redemption 2",
+    "process_names": ["RDR2.exe"],
+    "window_title_substrings": ["Red Dead Redemption 2"]
+  },
+  {
+    "canonical_game": "God of War Ragnarök",
+    "process_names": ["GoWR.exe"],
+    "window_title_substrings": ["God of War Ragnarök", "Ragnarök", "Ragnarok"]
+  },
+  {
+    "canonical_game": "God of War (2018)",
+    "process_names": ["GoW.exe"],
+    "window_title_substrings": ["God of War"]
+  },
+  {
+    "canonical_game": "Disco Elysium",
+    "process_names": ["disco.exe"],
+    "window_title_substrings": ["Disco Elysium"]
+  },
+  {
+    "canonical_game": "Naruto Shippuden: Ultimate Ninja Storm Connections",
+    "process_names": ["NSUNSC.exe"],
+    "window_title_substrings": ["NSUNC"]
+  },
+  {
+    "canonical_game": "Naruto Shippuden: Ultimate Ninja Storm 4",
+    "process_names": ["NSUNS4.exe"],
+    "window_title_substrings": ["Ultimate Ninja STORM 4", "NSUNS4"]
+  }
+]

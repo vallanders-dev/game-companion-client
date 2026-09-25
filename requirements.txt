@@ -1,0 +1,15 @@
+# Companheiro de Jogo - cliente. Windows 10/11, Python 3.14.
+keyboard>=0.13.5
+pywin32>=306
+mss>=9.0.1
+Pillow>=10.0.0
+sounddevice>=0.4.6
+numpy>=1.26
+# Runs the mic's voice-activity model (client/assets/silero_vad.onnx).
+onnxruntime>=1.29.0
+pygame-ce>=2.5.0
+pyside6>=6.7.0
+pystray>=0.19.5
+python-dotenv>=1.0.1
+playsound3>=3.0.0
+websockets>=13.0
