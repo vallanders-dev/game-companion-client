@@ -1,10 +1,10 @@
-# Companheiro de Jogo (beta)
+# Parça (beta)
 
-Um companheiro de jogo por voz. Aperte uma tecla enquanto joga, faça a
+Seu parceiro de jogo por voz. Aperte uma tecla enquanto joga, faça a
 pergunta em voz alta e ouça a resposta, sem sair do jogo.
 
 Este repositório é só o **cliente**: ele grava sua voz, captura a tela do
-jogo e toca a resposta. Quem responde é o servidor do teste. Você precisa
+jogo e toca a resposta. Quem responde é o servidor do Parça. Você precisa
 de um **token de testador**, fornecido por quem organiza o beta.
 
 ## Requisitos
@@ -26,15 +26,6 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-Depois copie `client\.env.example` para `client\.env` e preencha:
-
-```
-SERVER_URL=<endereço do servidor, recebido junto com o token>
-SERVER_AUTH_TOKEN=<seu token de testador>
-```
-
-Não compartilhe o seu token.
-
 ## Como usar
 
 ```powershell
@@ -43,10 +34,16 @@ cd game-companion-client
 python -m client.main
 ```
 
+**Na primeira vez**, abre uma janelinha pedindo o seu token: cole o token
+que você recebeu e clique em **Conectar**. Ele fica salvo no seu usuário do
+Windows, e nas próximas vezes o Parça já entra direto. O token é só seu:
+não compartilhe.
+
 - **F8**: pergunta por voz (captura a tela e grava a pergunta)
 - **F6**: anota algo pra ele lembrar depois (ele confirma por voz)
 - **BACK + LB** no controle: mesma coisa que o F8
-- Aperte **F8** de novo enquanto ele fala para interromper e perguntar outra coisa
+- Aperte **F8** ou **F6** enquanto ele fala para interromper e mandar outro comando
+- Terminou? Um "valeu, Parça" encerra a conversa
 
 Dicas importantes:
 
@@ -56,9 +53,16 @@ Dicas importantes:
   administrador também** (clique com o botão direito > "Executar como
   administrador"). Senão o Windows esconde as teclas do programa enquanto
   o jogo está em foco, e o F8/F6 não fazem nada.
+- Se a internet cair ou o servidor reiniciar, é só perguntar de novo: o
+  Parça se reconecta sozinho.
 
 ## Atualizações
 
 Toda vez que você abre o programa ele verifica se há uma versão nova e se
-atualiza sozinho. Para desligar, coloque `AUTO_UPDATE=false` no
-`client\.env`.
+atualiza sozinho.
+
+## Trocar de token
+
+Se o servidor recusar o seu token, a janela aparece de novo. Para trocar
+manualmente, apague o arquivo `%APPDATA%\Parca\settings.json` e abra o
+Parça de novo.

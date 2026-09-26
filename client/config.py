@@ -36,7 +36,15 @@ except ImportError:
 PROJECT_ROOT = Path(__file__).resolve().parent  # client/, not the repo root
 USER_CONFIG_PATH = PROJECT_ROOT / "config.json"
 
-DEFAULT_SERVER_URL = "ws://127.0.0.1:8000/v1/ws"
+# The hosted Parça server. client/.env's SERVER_URL overrides it (local
+# development against `python -m server.main serve`).
+DEFAULT_SERVER_URL = "wss://api.parcaplay.com/v1/ws"
+
+# Where a tester's token lives once entered in the first-launch window
+# (client/gui/token_dialog.py): their own Windows profile, outside the
+# program folder, so it's never copied, zipped or committed with the app.
+USER_SETTINGS_DIR = Path(os.environ.get("APPDATA") or Path.home()) / "Parca"
+USER_SETTINGS_PATH = USER_SETTINGS_DIR / "settings.json"
 DEFAULT_CAPTURE_HOTKEY = "f8"
 DEFAULT_REMEMBER_HOTKEY = "f6"
 DEFAULT_GAMEPAD_COMBO = "back+leftshoulder"
@@ -58,10 +66,6 @@ DEFAULT_TRAY_ENABLED = False     # ditto
 DEFAULT_VERBOSE_TELEMETRY = True
 DEFAULT_GAME_DETECT_POLL_SECONDS = 1.0
 DEFAULT_GAME_VOICE_MATCH_MIN_RATIO = 0.72
-
-
-class ConfigError(RuntimeError):
-    """Raised when a required environment variable is missing."""
 
 
 @dataclass
@@ -108,13 +112,6 @@ def save_user_config(data: dict) -> None:
         fh.write("\n")
 
 
-def _require(name: str) -> str:
-    value = os.environ.get(name, "").strip()
-    if not value:
-        raise ConfigError(f"Environment variable {name} is not set (client/.env).")
-    return value
-
-
 def _env(name: str, default: str) -> str:
     return os.environ.get(name, "").strip() or default
 
@@ -158,18 +155,32 @@ def resolve_gamepad_combo(user_cfg: dict | None = None) -> str:
     return from_cfg or os.environ.get("GAMEPAD_COMBO", "").strip() or DEFAULT_GAMEPAD_COMBO
 
 
-def load_client_settings(require_server: bool = True) -> ClientSettings:
-    """``require_server=False`` skips the ``SERVER_AUTH_TOKEN`` check -
-    not currently used by anything (there's no client-side equivalent of
-    ``ingest`` that needs to run without one), kept for symmetry with
-    ``server/config.py``'s identical escape hatch."""
+def load_saved_token() -> str:
+    try:
+        data = json.loads(USER_SETTINGS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    return str(data.get("token", "")).strip() if isinstance(data, dict) else ""
 
-    def secret(name: str) -> str:
-        return _require(name) if require_server else os.environ.get(name, "").strip()
 
+def save_token(token: str) -> None:
+    USER_SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        data = json.loads(USER_SETTINGS_PATH.read_text(encoding="utf-8"))
+        data = data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        data = {}
+    data["token"] = token.strip()
+    USER_SETTINGS_PATH.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def load_client_settings() -> ClientSettings:
+    """The token comes from SERVER_AUTH_TOKEN in client/.env (development)
+    or, for testers, the one saved by the first-launch window; empty if
+    neither exists - client.main then opens that window."""
     return ClientSettings(
         server_url=_env("SERVER_URL", DEFAULT_SERVER_URL),
-        server_auth_token=secret("SERVER_AUTH_TOKEN"),
+        server_auth_token=os.environ.get("SERVER_AUTH_TOKEN", "").strip() or load_saved_token(),
         capture_hotkey=resolve_capture_hotkey(),
         remember_hotkey=resolve_remember_hotkey(),
         gamepad_combo=resolve_gamepad_combo(),

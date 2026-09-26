@@ -52,7 +52,7 @@ from client.capture import (
     prompt_scene,
     resolve_spoken_game,
 )
-from client.config import load_client_settings
+from client.config import load_client_settings, save_token
 from client.fixed_audio import FillerPlayer, load_fillers, load_line, mark_answer_started, play_line
 from client.fixed_lines import (
     CAP_REACHED_MESSAGE, CLOSING_LINE, GAME_ASK_MESSAGE, GAME_ASK_REASK_MESSAGE, GAME_UNRESOLVED_MESSAGE,
@@ -60,7 +60,7 @@ from client.fixed_lines import (
 )
 from client.gamepad import GamepadWatcher, describe_combo
 from client.listen import play_confirm_tone, play_stop_tone, preload_vad_model, record_until_silence
-from client.net import ServerError, ServerSession
+from client.net import AuthError, ServerError, ServerSession
 from client.speech import AudioOut
 from client.updater import check_for_update
 
@@ -293,15 +293,47 @@ def _remember_note(session: ServerSession, settings, game: str, barge: "BargeInW
     return None
 
 
-def cmd_ask(_args: argparse.Namespace) -> int:
-    settings = load_client_settings(require_server=True)
-    print(f"Conectando a {settings.server_url}...")
-    session = ServerSession(settings.server_url, settings.server_auth_token)
+def _ask_for_token(reason: str) -> bool:
+    """Opens the first-launch token window (its own process - client.main
+    never imports Qt) and waits for it. True once a token the server
+    accepts has been saved. Falls back to a console prompt if the window
+    can't open at all (no display, Qt missing)."""
     try:
-        display_name = session.connect()
-    except ServerError as exc:
-        print(f"ERRO: {exc}")
+        code = subprocess.call([sys.executable, "-m", "client.gui.token_dialog", "--reason", reason])
+    except OSError:
+        code = 2
+    if code in (0, 1):
+        return code == 0
+    token = _prompt("Cole o seu token de testador: ").replace("SERVER_AUTH_TOKEN=", "").strip()
+    if token:
+        save_token(token)
+    return bool(token)
+
+
+def cmd_ask(_args: argparse.Namespace) -> int:
+    settings = load_client_settings()
+    if not settings.server_auth_token and not _ask_for_token("missing"):
+        print("Sem token de testador - até a próxima!")
         return 1
+    settings = load_client_settings()
+    print(f"Conectando a {settings.server_url}...")
+    while True:
+        session = ServerSession(settings.server_url, settings.server_auth_token)
+        try:
+            display_name = session.connect()
+            break
+        except AuthError:
+            # The saved token was revoked or mistyped: ask for a new one
+            # instead of just failing. A token from client/.env (development)
+            # is the developer's to fix, not a window's.
+            if os.environ.get("SERVER_AUTH_TOKEN") or not _ask_for_token("rejected"):
+                print("ERRO: o servidor não aceitou o token de testador.")
+                return 1
+            settings = load_client_settings()
+        except ServerError as exc:
+            print(f"ERRO: {exc}")
+            print("  (servidor fora do ar ou sem internet - tente de novo em instantes)")
+            return 1
     print(f"Conectado como '{display_name}'.")
 
     preload_vad_model()

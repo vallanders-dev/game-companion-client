@@ -25,8 +25,14 @@ import threading
 
 
 class ServerError(RuntimeError):
-    """Raised on an `auth_error` handshake response, or a closed/broken
+    """Raised on a failed connection or handshake, or a closed/broken
     connection encountered mid-call."""
+
+
+class AuthError(ServerError):
+    """The server rejected the token (unknown, revoked or disabled tester)
+    - distinct from the server being unreachable, so the client can ask for
+    a new token instead of just reporting a network problem."""
 
 
 def _unpack_audio_frame(frame: bytes) -> tuple[int, bytes]:
@@ -60,7 +66,7 @@ class ServerSession:
         msg = json.loads(raw)
         if msg.get("type") == "auth_error":
             self.close()
-            raise ServerError(f"servidor recusou o token: {msg.get('detail', '')}")
+            raise AuthError(f"servidor recusou o token: {msg.get('detail', '')}")
         if msg.get("type") != "auth_ok":
             self.close()
             raise ServerError(f"handshake inesperado do servidor: {msg}")
