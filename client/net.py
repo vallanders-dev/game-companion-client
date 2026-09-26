@@ -47,6 +47,7 @@ class ServerSession:
         connection failure - the caller decides whether that's fatal."""
         from websockets.sync.client import connect
 
+        self.close()
         try:
             self._ws = connect(
                 self.server_url, additional_headers={"Authorization": f"Bearer {self.token}"},
@@ -54,11 +55,14 @@ class ServerSession:
             )
             raw = self._ws.recv(timeout=timeout)
         except Exception as exc:  # noqa: BLE001 - connection/handshake failure, not our business which kind
+            self.close()
             raise ServerError(f"não consegui conectar ao servidor: {exc}") from exc
         msg = json.loads(raw)
         if msg.get("type") == "auth_error":
+            self.close()
             raise ServerError(f"servidor recusou o token: {msg.get('detail', '')}")
         if msg.get("type") != "auth_ok":
+            self.close()
             raise ServerError(f"handshake inesperado do servidor: {msg}")
         self.display_name = str(msg.get("display_name", ""))
         return self.display_name
@@ -74,6 +78,27 @@ class ServerSession:
     @property
     def is_connected(self) -> bool:
         return self._ws is not None
+
+    def _send_opening(self, frames: list) -> None:
+        """Sends the opening frames of a request (turn_start / stt_request
+        + its binary frames). Reconnects first if the connection is known to
+        be gone, and if the send itself fails - the idle connection was
+        closed under us by a server restart/deploy or a network blip - it
+        reconnects and resends ONCE: nothing of this request reached the
+        server, so a resend can't double anything. A connection that dies
+        mid-answer is NOT retried (the server may already have done paid
+        work); that one turn fails, and the next request reconnects here."""
+        for attempt in (1, 2):
+            if self._ws is None:
+                self.connect()
+            try:
+                for frame in frames:
+                    self._ws.send(frame)
+                return
+            except Exception as exc:  # noqa: BLE001 - any send failure means a dead connection
+                self.close()
+                if attempt == 2:
+                    raise ServerError(f"conexão com o servidor perdida: {exc}") from exc
 
     # -- ask turn ---------------------------------------------------------------
     def ask(
@@ -113,9 +138,6 @@ class ServerSession:
         message arrives - `on_audio(pcm, turn_seq)` is where the caller
         writes to its own `AudioOut`.
         """
-        if self._ws is None:
-            raise ServerError("ask() chamado sem uma conexão ativa - connect() primeiro")
-
         msg: dict = {
             "type": "turn_start", "turn_id": turn_id, "kind": "ask", "game": game,
             "has_screenshot": screenshot_bytes is not None, "has_audio": wav_bytes is not None,
@@ -124,11 +146,12 @@ class ServerSession:
             msg["question_text"] = question_text
         if allow_spoilers is not None:
             msg["allow_spoilers"] = allow_spoilers
-        self._ws.send(json.dumps(msg))
+        frames: list = [json.dumps(msg)]
         if screenshot_bytes is not None:
-            self._ws.send(screenshot_bytes)
+            frames.append(screenshot_bytes)
         if wav_bytes is not None:
-            self._ws.send(wav_bytes)
+            frames.append(wav_bytes)
+        self._send_opening(frames)
 
         return self._pump(turn_id, cancel, on_state, on_meta, on_text, on_audio, on_usage)
 
@@ -136,13 +159,17 @@ class ServerSession:
         cancel_sent = False
         while True:
             if cancel is not None and cancel.is_set() and not cancel_sent:
-                self._ws.send(json.dumps({"type": "turn_cancel", "turn_id": turn_id}))
                 cancel_sent = True
+                try:
+                    self._ws.send(json.dumps({"type": "turn_cancel", "turn_id": turn_id}))
+                except Exception:  # noqa: BLE001 - dead connection: the recv below reports it
+                    pass
             try:
                 raw = self._ws.recv(timeout=0.05)
             except TimeoutError:
                 continue
             except Exception as exc:  # noqa: BLE001 - connection dropped mid-turn
+                self.close()  # the next request reconnects
                 raise ServerError(f"conexão caiu durante o turno: {exc}") from exc
 
             if isinstance(raw, (bytes, bytearray)):
@@ -196,28 +223,30 @@ class ServerSession:
         (which arrives before the prompt's own audio has even finished
         streaming).
         """
-        if self._ws is None:
-            raise ServerError("remember() chamado sem uma conexão ativa - connect() primeiro")
-
         msg = {
             "type": "turn_start", "turn_id": turn_id, "kind": "remember", "game": game,
             "has_screenshot": screenshot_bytes is not None, "has_audio": True,
         }
-        self._ws.send(json.dumps(msg))
+        frames: list = [json.dumps(msg)]
         if screenshot_bytes is not None:
-            self._ws.send(screenshot_bytes)
-        self._ws.send(note_wav)
+            frames.append(screenshot_bytes)
+        frames.append(note_wav)
+        self._send_opening(frames)
 
         cancel_sent = False
         while True:
             if cancel is not None and cancel.is_set() and not cancel_sent:
-                self._ws.send(json.dumps({"type": "turn_cancel", "turn_id": turn_id}))
                 cancel_sent = True
+                try:
+                    self._ws.send(json.dumps({"type": "turn_cancel", "turn_id": turn_id}))
+                except Exception:  # noqa: BLE001 - dead connection: the recv below reports it
+                    pass
             try:
                 raw = self._ws.recv(timeout=0.05)
             except TimeoutError:
                 continue
             except Exception as exc:  # noqa: BLE001
+                self.close()  # the next request reconnects
                 raise ServerError(f"conexão caiu durante o turno: {exc}") from exc
 
             if isinstance(raw, (bytes, bytearray)):
@@ -233,11 +262,15 @@ class ServerSession:
                     on_state(data["state"])
                 if data["state"] == "ouvindo":
                     reply_wav = record_reply()
-                    self._ws.send(json.dumps({
-                        "type": "turn_continue", "turn_id": turn_id, "has_audio": bool(reply_wav),
-                    }))
-                    if reply_wav:
-                        self._ws.send(reply_wav)
+                    try:
+                        self._ws.send(json.dumps({
+                            "type": "turn_continue", "turn_id": turn_id, "has_audio": bool(reply_wav),
+                        }))
+                        if reply_wav:
+                            self._ws.send(reply_wav)
+                    except Exception as exc:  # noqa: BLE001
+                        self.close()
+                        raise ServerError(f"conexão caiu durante o turno: {exc}") from exc
             elif mtype == "usage_update" and on_usage is not None:
                 on_usage(data["count"], data["cap"])
             elif mtype == "turn_result":
@@ -257,15 +290,14 @@ class ServerSession:
         exactly as it already does in the single-process app - this
         method only replaces the local Scribe call with a network one.
         Returns `(text, error)`, same contract as the server function."""
-        if self._ws is None:
-            raise ServerError("stt_request() chamado sem uma conexão ativa - connect() primeiro")
         request_id = f"stt-{id(wav_bytes)}-{threading.get_ident()}"
-        self._ws.send(json.dumps({"type": "stt_request", "request_id": request_id, "has_audio": True}))
-        self._ws.send(wav_bytes)
+        self._send_opening([json.dumps({"type": "stt_request", "request_id": request_id, "has_audio": True}),
+                            wav_bytes])
         while True:
             try:
                 raw = self._ws.recv(timeout=timeout)
             except Exception as exc:  # noqa: BLE001
+                self.close()  # the next request reconnects
                 raise ServerError(f"conexão caiu durante a transcrição: {exc}") from exc
             if isinstance(raw, (bytes, bytearray)):
                 continue  # not expected here, ignore defensively

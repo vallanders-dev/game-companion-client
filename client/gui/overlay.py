@@ -536,7 +536,7 @@ class OverlayWindow(QWidget):
 
     def _apply_capture_exclusion(self) -> None:
         """The overlay must never itself appear in a screenshot sent to
-        Kimi vision (capture.capture_game_window_png() crops to the game
+        Kimi vision (capture.capture_game_window_jpeg() crops to the game
         window, which can overlap the overlay's own corner) or in anything
         else that captures the screen - SetWindowDisplayAffinity with
         WDA_EXCLUDEFROMCAPTURE (Windows 10 2004+) makes the window invisible

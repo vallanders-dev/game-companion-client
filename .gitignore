@@ -2,5 +2,7 @@ __pycache__/
 *.pyc
 .venv/
 client/.env
+client/.env.*
+!client/.env.example
 client/config.json
 client/output/

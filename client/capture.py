@@ -9,10 +9,10 @@ The global hotkey uses the ``keyboard`` library. Its low-level hook can miss key
 presses while a game runs in *exclusive* fullscreen - run games in "borderless"
 / "windowed fullscreen" mode so the hotkey is seen. See README.md.
 
-**Screen capture privacy (2026-09-24).** ``capture_screenshot_png()`` used
+**Screen capture privacy (2026-09-24).** ``capture_screenshot_jpeg()`` used
 to grab the whole primary monitor unconditionally - sending anything else
 on screen (chat, another app, the desktop) to a third-party vision API on
-every single turn. ``capture_game_window_png()`` is the real turn-taking
+every single turn. ``capture_game_window_jpeg()`` is the real turn-taking
 call sites' entry point now: it crops to the foreground window's own
 bounds, and ONLY if that window matches a known ``game_aliases.json``
 entry (the exact same matching ``detect_game()`` uses, via
@@ -21,13 +21,12 @@ disagree). If the foreground window isn't a recognized game, it raises
 rather than silently falling back to a whole-monitor grab - the caller's
 existing "couldn't capture, continue without a scene" handling (never
 blocks the turn) is the failure path, matching every other capture
-failure. ``capture_screenshot_png()`` itself is unchanged/still available
+failure. ``capture_screenshot_jpeg()`` itself is unchanged/still available
 for anything that genuinely wants the whole monitor (kept for
 ``eval/capture_sample.py``'s manual sampling).
 """
 from __future__ import annotations
 
-import base64
 import difflib
 import io
 import json
@@ -43,7 +42,12 @@ from pathlib import Path
 
 from client import launcher_lookup
 
-_MAX_WIDTH = 1280  # screenshots are downscaled to this before base64 encoding
+# JPEG q80 at 960 px wide, not PNG at 1280: measured 2026-09-26
+# (eval/scene_image_size_timing.py, 6 real game screenshots) - ~56 KB vs
+# ~1 MB and a median Kimi scene read of 2.49 s vs 3.57 s, with scenes as
+# good or better; 640 px started breaking the one-short-phrase reply.
+_MAX_WIDTH = 960
+_JPEG_QUALITY = 80
 
 _keyboard_mod = None
 _keyboard_probed = False
@@ -102,13 +106,13 @@ def _keyboard():
 # --------------------------------------------------------------------------- #
 # Screenshot
 # --------------------------------------------------------------------------- #
-def capture_screenshot_png(max_width: int = _MAX_WIDTH, region: dict | None = None) -> bytes:
+def capture_screenshot_jpeg(max_width: int = _MAX_WIDTH, region: dict | None = None) -> bytes:
     """Grab ``region`` (an mss-style ``{"left", "top", "width", "height"}``
     dict) if given, else the whole primary monitor, and return downscaled
-    PNG bytes. The real turn-taking code calls `capture_game_window_png()`
+    JPEG bytes. The real turn-taking code calls `capture_game_window_jpeg()`
     instead (see module docstring); this stays available - with its
     original whole-monitor default - for anything that genuinely wants
-    that, e.g. `eval/capture_sample.py`'s manual sampling."""
+    that."""
     import mss
     from PIL import Image
 
@@ -123,14 +127,8 @@ def capture_screenshot_png(max_width: int = _MAX_WIDTH, region: dict | None = No
         img = img.resize((max_width, height), resample)
 
     buf = io.BytesIO()
-    img.save(buf, format="PNG", optimize=True)
+    img.save(buf, format="JPEG", quality=_JPEG_QUALITY, optimize=True)
     return buf.getvalue()
-
-
-def to_data_uri(png_bytes: bytes) -> str:
-    """Moonshot's API wants images as base64 data URIs, not remote URLs."""
-    b64 = base64.b64encode(png_bytes).decode("ascii")
-    return f"data:image/png;base64,{b64}"
 
 
 # --------------------------------------------------------------------------- #
@@ -580,7 +578,7 @@ def get_foreground_game_window_rect(aliases_path: Path) -> dict | None:
     return {"left": left, "top": top, "width": width, "height": height}
 
 
-def capture_game_window_png(aliases_path: Path, max_width: int = _MAX_WIDTH) -> bytes:
+def capture_game_window_jpeg(aliases_path: Path, max_width: int = _MAX_WIDTH) -> bytes:
     """The real turn-taking entry point (see module docstring): screenshots
     ONLY the recognized foreground game window, cropped to its bounds -
     never the whole monitor. Raises RuntimeError if the foreground window
@@ -590,7 +588,7 @@ def capture_game_window_png(aliases_path: Path, max_width: int = _MAX_WIDTH) -> 
     rect = get_foreground_game_window_rect(aliases_path)
     if rect is None:
         raise RuntimeError("nenhum jogo reconhecido em primeiro plano — captura pulada")
-    return capture_screenshot_png(max_width=max_width, region=rect)
+    return capture_screenshot_jpeg(max_width=max_width, region=rect)
 
 
 # --------------------------------------------------------------------------- #

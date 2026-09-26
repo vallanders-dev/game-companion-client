@@ -46,14 +46,14 @@ import uuid
 from client.capture import (
     GAME_CHANGED,
     HotkeyManager,
-    capture_game_window_png,
+    capture_game_window_jpeg,
     detect_game,
     load_game_aliases,
     prompt_scene,
     resolve_spoken_game,
 )
 from client.config import load_client_settings
-from client.fixed_audio import FillerPlayer, load_fillers, mark_answer_started, play_line
+from client.fixed_audio import FillerPlayer, load_fillers, load_line, mark_answer_started, play_line
 from client.fixed_lines import (
     CAP_REACHED_MESSAGE, CLOSING_LINE, GAME_ASK_MESSAGE, GAME_ASK_REASK_MESSAGE, GAME_UNRESOLVED_MESSAGE,
     NO_NOTES_BAKED_HOTKEY, NO_NOTES_LINE,
@@ -197,13 +197,46 @@ class BargeInWatcher:
             time.sleep(self.poll_seconds)
 
 
-def _remember_note(session: ServerSession, settings, game: str) -> None:
+def _speak_line(name: str, barge: "BargeInWatcher | None", *, fallback_tone: bool = True):
+    """Speaks a baked end-of-turn line ("Anotado.", "Beleza!", no-notes, cap)
+    and lets any trigger cut it: the player's next command outranks the
+    confirmation. Returns the trigger that interrupted it (handled by the
+    loop as its next command, like any barge-in) or None. Without barge-in
+    (BARGE_IN=false) it plays through, as before."""
+    pcm = load_line(name)
+    if pcm is None:
+        if fallback_tone:
+            play_stop_tone()
+        return None
+    out = AudioOut()
+    cancel = threading.Event()
+    try:
+        out.open()
+    except Exception:  # noqa: BLE001 - no output device: the text was already printed
+        out.close(drain=False)
+        return None
+    if barge is not None:
+        barge.arm(cancel, out)
+    out.write(pcm, cancel)
+    if cancel.is_set():
+        out.interrupt()
+    else:
+        out.close(drain=True)
+    fired = barge.fired if (barge is not None and cancel.is_set()) else None
+    if barge is not None:
+        barge.disarm()
+    return fired
+
+
+def _remember_note(session: ServerSession, settings, game: str, barge: "BargeInWatcher | None"):
     """The F6 flow - see `client.net.ServerSession.remember()`'s docstring
-    for the `on_state("ouvindo")` -> record -> `turn_continue` protocol."""
+    for the `on_state("ouvindo")` -> record -> `turn_continue` protocol.
+    Returns a trigger pressed during the closing line (the loop's next
+    command), or None."""
     print(f"  Anotando uma nota pessoal para '{game}'...")
     screenshot = None
     try:
-        screenshot = capture_game_window_png(settings.game_aliases_path)
+        screenshot = capture_game_window_jpeg(settings.game_aliases_path)
     except Exception as exc:  # noqa: BLE001
         telemetry(f"  (captura falhou: {exc})")
 
@@ -244,8 +277,8 @@ def _remember_note(session: ServerSession, settings, game: str) -> None:
     if outcome == "note_saved":
         print(f'  Anotado: "{result.get("answer_text", "")}"')
         play_confirm_tone()
-        play_line("note_saved", fallback_tone=False)
-    elif outcome == "note_discarded":
+        return _speak_line("note_saved", barge, fallback_tone=False)
+    if outcome == "note_discarded":
         reason = result.get("stats", {}).get("reason", "")
         print(f"  Nota descartada ({reason}).")
         play_stop_tone()
@@ -254,9 +287,10 @@ def _remember_note(session: ServerSession, settings, game: str) -> None:
         play_stop_tone()
     elif outcome == "cap_reached":
         print(f"  {CAP_REACHED_MESSAGE} (nota não salva)")
-        play_line("cap_reached")
+        return _speak_line("cap_reached", barge)
     else:
         telemetry(f"  (resultado inesperado: {outcome})")
+    return None
 
 
 def cmd_ask(_args: argparse.Namespace) -> int:
@@ -361,7 +395,7 @@ def cmd_ask(_args: argparse.Namespace) -> int:
             continue
 
         if fired is remember_manager:
-            _remember_note(session, settings, game)
+            pending_fired = _remember_note(session, settings, game, barge)
             print("-" * 48)
             continue
 
@@ -372,7 +406,7 @@ def cmd_ask(_args: argparse.Namespace) -> int:
         if used_trigger:
             print("  Capturando a tela...")
             try:
-                screenshot = capture_game_window_png(settings.game_aliases_path)
+                screenshot = capture_game_window_jpeg(settings.game_aliases_path)
             except Exception as exc:  # noqa: BLE001
                 print("  (não consegui capturar a tela — seguindo sem ela)")
                 telemetry(f"  (captura falhou: {exc})")
@@ -468,19 +502,19 @@ def cmd_ask(_args: argparse.Namespace) -> int:
         print(f"  Companion: {result.get('answer_text', '')}")
         outcome = result.get("outcome")
         if pending_fired is None:
-            # Server sends no audio for these two - the client speaks them
-            # from shipped assets. The first live pass heard the no-notes
-            # line as a silent reply before this existed.
+            # Server sends no audio for these - the client speaks them from
+            # shipped assets, interruptible: a trigger pressed while one
+            # plays cuts it and becomes the next command (pending_fired).
             if outcome == "cap_reached":
                 print(f"  {CAP_REACHED_MESSAGE}")
-                play_line("cap_reached")
+                pending_fired = _speak_line("cap_reached", barge)
             elif outcome == "answered_no_audio":
                 print("  (sem cota pra falar a resposta — ela fica no texto acima)")
-                play_line("cap_reached")
+                pending_fired = _speak_line("cap_reached", barge)
             elif outcome == "no_notes" and settings.remember_hotkey.lower() == NO_NOTES_BAKED_HOTKEY:
-                play_line(NO_NOTES_LINE)
+                pending_fired = _speak_line(NO_NOTES_LINE, barge)
             elif outcome == "closing":
-                play_line(CLOSING_LINE)
+                pending_fired = _speak_line(CLOSING_LINE, barge)
         timing = result.get("stats", {}).get("timing") or {}
         if timing or t_first_heard is not None:
             # Where a turn's wait goes. "espera de silêncio" is the mic's
