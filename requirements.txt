@@ -8,7 +8,9 @@ numpy>=1.26
 # Runs the mic's voice-activity model (client/assets/silero_vad.onnx).
 onnxruntime>=1.29.0
 pygame-ce>=2.5.0
-pyside6>=6.7.0
+# Only QtCore/QtGui/QtWidgets are used - the full "pyside6" package adds ~450 MB
+# of modules (web engine, 3D, ...) the client never loads.
+pyside6-essentials>=6.7.0
 pystray>=0.19.5
 python-dotenv>=1.0.1
 playsound3>=3.0.0

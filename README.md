@@ -3,41 +3,26 @@
 Seu parceiro de jogo por voz. Aperte uma tecla enquanto joga, faça a
 pergunta em voz alta e ouça a resposta, sem sair do jogo.
 
-Este repositório é só o **cliente**: ele grava sua voz, captura a tela do
-jogo e toca a resposta. Quem responde é o servidor do Parça. Você precisa
-de um **token de testador**, fornecido por quem organiza o beta.
+Você precisa de um **token de testador**, fornecido por quem organiza o beta.
 
-## Requisitos
+## Instalação (uma vez só)
 
-- Windows 10 ou 11
-- [Python 3.14](https://www.python.org/downloads/) (marque "Add python.exe to PATH" na instalação)
-- [Git](https://git-scm.com/download/win), para receber as atualizações automáticas
-- Microfone e fones/caixas de som
+1. **Instale o Python:** baixe em [python.org/downloads](https://www.python.org/downloads/)
+   e, na primeira tela do instalador, **marque "Add python.exe to PATH"**.
+2. **Baixe o instalador do Parça:**
+   [instalar-parca.cmd](https://github.com/vallanders-dev/game-companion-client/releases/latest/download/instalar-parca.cmd)
+3. **Dê dois cliques nele.** Se o Windows mostrar "O Windows protegeu o
+   computador", clique em **Mais informações** e depois em **Executar assim
+   mesmo**. A instalação leva alguns minutos e cria o ícone **Parça** na
+   área de trabalho.
+4. O Parça abre sozinho no final. Na janela que aparecer, **cole o seu
+   token** e clique em **Conectar**. Pronto!
 
-## Instalação
-
-No PowerShell:
-
-```powershell
-git clone https://github.com/vallanders-dev/game-companion-client.git
-cd game-companion-client
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-```
+O token fica salvo no seu usuário do Windows. É só seu: não compartilhe.
 
 ## Como usar
 
-```powershell
-cd game-companion-client
-.venv\Scripts\Activate.ps1
-python -m client.main
-```
-
-**Na primeira vez**, abre uma janelinha pedindo o seu token: cole o token
-que você recebeu e clique em **Conectar**. Ele fica salvo no seu usuário do
-Windows, e nas próximas vezes o Parça já entra direto. O token é só seu:
-não compartilhe.
+Abra pelo ícone **Parça** na área de trabalho e jogue normalmente.
 
 - **F8**: pergunta por voz (captura a tela e grava a pergunta)
 - **F6**: anota algo pra ele lembrar depois (ele confirma por voz)
@@ -49,16 +34,16 @@ Dicas importantes:
 
 - Rode o jogo em **janela sem bordas** ou **tela cheia em janela**. Em tela
   cheia exclusiva as teclas podem não ser detectadas.
-- **Se o jogo roda como administrador, abra o PowerShell como
-  administrador também** (clique com o botão direito > "Executar como
-  administrador"). Senão o Windows esconde as teclas do programa enquanto
-  o jogo está em foco, e o F8/F6 não fazem nada.
+- **Se o jogo roda como administrador**, abra o Parça do mesmo jeito:
+  clique com o botão direito no ícone **Parça** e escolha **Executar como
+  administrador**. Senão o Windows esconde as teclas do Parça enquanto o
+  jogo está em foco, e o F8/F6 não fazem nada.
 - Se a internet cair ou o servidor reiniciar, é só perguntar de novo: o
   Parça se reconecta sozinho.
 
 ## Atualizações
 
-Toda vez que você abre o programa ele verifica se há uma versão nova e se
+Toda vez que você abre o Parça ele verifica se há uma versão nova e se
 atualiza sozinho.
 
 ## Trocar de token
@@ -66,3 +51,9 @@ atualiza sozinho.
 Se o servidor recusar o seu token, a janela aparece de novo. Para trocar
 manualmente, apague o arquivo `%APPDATA%\Parca\settings.json` e abra o
 Parça de novo.
+
+## Instalando pelo Git (opcional)
+
+Quem preferir: `git clone` este repositório, crie um ambiente com
+`python -m venv .venv`, rode `.venv\Scripts\pip install -r requirements.txt`
+e abra pelo `Parca.cmd`. As atualizações chegam do mesmo jeito.
