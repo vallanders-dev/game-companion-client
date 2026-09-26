@@ -416,6 +416,110 @@ def _normalize_exe_stem(name: str) -> str:
     return stem
 
 
+# --- process lookups (ctypes; pywin32 has no QueryFullProcessImageName) ---
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_TOKEN_QUERY = 0x0008
+_TOKEN_ELEVATION = 20  # TOKEN_INFORMATION_CLASS.TokenElevation
+_win_api = None
+
+
+def _kernel32_advapi32():
+    global _win_api
+    if _win_api is None:
+        import ctypes
+        from ctypes import wintypes
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        adv = ctypes.WinDLL("advapi32", use_last_error=True)
+        k32.OpenProcess.restype = wintypes.HANDLE
+        k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        k32.GetCurrentProcess.restype = wintypes.HANDLE
+        k32.QueryFullProcessImageNameW.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+        adv.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+        adv.GetTokenInformation.argtypes = [
+            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+        _win_api = (ctypes, wintypes, k32, adv)
+    return _win_api
+
+
+def _process_image_path(pid: int) -> Path | None:
+    """Full exe path of `pid`, or None. Opens the process with
+    PROCESS_QUERY_LIMITED_INFORMATION - the one right Windows grants a normal
+    process on an ELEVATED one. The old PROCESS_QUERY_INFORMATION |
+    PROCESS_VM_READ open was refused for every game running as administrator,
+    so detection found nothing and the client sat silent (measured 2026-09-26:
+    all 10 elevated processes in the session refused the old open, all were
+    readable this way)."""
+    try:
+        ctypes, wintypes, k32, _ = _kernel32_advapi32()
+        handle = k32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return None
+        try:
+            buf = ctypes.create_unicode_buffer(1024)
+            size = wintypes.DWORD(len(buf))
+            if not k32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                return None
+            return Path(buf.value)
+        finally:
+            k32.CloseHandle(handle)
+    except Exception:  # noqa: BLE001 - not Windows, ctypes failure
+        return None
+
+
+def _token_elevated(process_handle) -> bool | None:
+    ctypes, wintypes, k32, adv = _kernel32_advapi32()
+    token = wintypes.HANDLE()
+    if not adv.OpenProcessToken(process_handle, _TOKEN_QUERY, ctypes.byref(token)):
+        return None
+    try:
+        value = wintypes.DWORD()
+        size = wintypes.DWORD()
+        if not adv.GetTokenInformation(token, _TOKEN_ELEVATION, ctypes.byref(value), 4, ctypes.byref(size)):
+            return None
+        return bool(value.value)
+    finally:
+        k32.CloseHandle(token)
+
+
+def process_is_elevated(pid: int | None = None) -> bool | None:
+    """True if `pid` (default: this process) runs as administrator, None if
+    Windows won't say."""
+    try:
+        _, _, k32, _ = _kernel32_advapi32()
+        if pid is None:
+            return _token_elevated(k32.GetCurrentProcess())
+        handle = k32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return None
+        try:
+            return _token_elevated(handle)
+        finally:
+            k32.CloseHandle(handle)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def foreground_game_needs_admin(aliases_path: Path) -> bool:
+    """True when the foreground window is a recognized game running as
+    administrator while this client isn't. Windows (UIPI) then hides every
+    key press from the client's keyboard hook while the game has focus, so
+    F8/F6 silently do nothing - the first live pass lost a session to it.
+    False whenever anything can't be determined (never warn on a guess)."""
+    match = _match_foreground_window(aliases_path)
+    if match is None:
+        return False
+    try:
+        import win32process
+
+        _, pid = win32process.GetWindowThreadProcessId(match[0])
+    except Exception:  # noqa: BLE001
+        return False
+    return process_is_elevated(pid) is True and process_is_elevated() is False
+
+
 def _match_foreground_window(aliases_path: Path) -> tuple[int, str] | None:
     """The shared lookup behind `detect_game()` (name only) and
     `get_foreground_game_window_rect()` (also needs the hwnd, to crop
@@ -426,8 +530,6 @@ def _match_foreground_window(aliases_path: Path) -> tuple[int, str] | None:
     `canonical`.
     """
     try:
-        import win32api
-        import win32con
         import win32gui
         import win32process
 
@@ -436,12 +538,11 @@ def _match_foreground_window(aliases_path: Path) -> tuple[int, str] | None:
         if not hwnd or not title:
             return None
         _, pid = win32process.GetWindowThreadProcessId(hwnd)
-        handle = win32api.OpenProcess(
-            win32con.PROCESS_QUERY_INFORMATION | win32con.PROCESS_VM_READ, False, pid
-        )
-        exe_path = Path(win32process.GetModuleFileNameEx(handle, 0))
+        exe_path = _process_image_path(pid)
+        if exe_path is None:
+            return None
         process_name = exe_path.name.lower()
-    except Exception:  # noqa: BLE001 - pywin32 missing, access denied, no window, ...
+    except Exception:  # noqa: BLE001 - pywin32 missing, no window, ...
         return None
 
     aliases = load_game_aliases(aliases_path)

@@ -36,6 +36,12 @@ GAME_ASK_MESSAGE = "Não identifiquei o jogo automaticamente. Qual jogo você es
 GAME_ASK_REASK_MESSAGE = "Não reconheci. Qual jogo você está jogando?"
 GAME_UNRESOLVED_MESSAGE = "Não consegui identificar o jogo por voz. Aperte F8 ou F6 pra tentar de novo."
 NOTE_SAVED_MESSAGE = "Anotado."
+# Spoken once per detected game when the game runs as administrator and the
+# client doesn't - Windows then hides every key press from the client.
+GAME_NEEDS_ADMIN_MESSAGE = (
+    "Atenção: o jogo está rodando como administrador, então o Windows não me deixa ouvir as teclas. "
+    "Feche o Parça e abra de novo com o botão direito no ícone, em Executar como administrador."
+)
 
 NO_NOTES_LINE = "no_notes"
 NO_NOTES_BAKED_HOTKEY = "f6"
@@ -53,6 +59,7 @@ LINES: dict[str, str] = {
     "game_reask": GAME_ASK_REASK_MESSAGE,
     "game_unresolved": GAME_UNRESOLVED_MESSAGE,
     "note_saved": NOTE_SAVED_MESSAGE,
+    "game_needs_admin": GAME_NEEDS_ADMIN_MESSAGE,
 }
 
 

@@ -48,6 +48,7 @@ from client.capture import (
     HotkeyManager,
     capture_game_window_jpeg,
     detect_game,
+    foreground_game_needs_admin,
     load_game_aliases,
     prompt_scene,
     resolve_spoken_game,
@@ -55,8 +56,8 @@ from client.capture import (
 from client.config import load_client_settings, save_token
 from client.fixed_audio import FillerPlayer, load_fillers, load_line, mark_answer_started, play_line
 from client.fixed_lines import (
-    CAP_REACHED_MESSAGE, CLOSING_LINE, GAME_ASK_MESSAGE, GAME_ASK_REASK_MESSAGE, GAME_UNRESOLVED_MESSAGE,
-    NO_NOTES_BAKED_HOTKEY, NO_NOTES_LINE,
+    CAP_REACHED_MESSAGE, CLOSING_LINE, GAME_ASK_MESSAGE, GAME_ASK_REASK_MESSAGE, GAME_NEEDS_ADMIN_MESSAGE,
+    GAME_UNRESOLVED_MESSAGE, NO_NOTES_BAKED_HOTKEY, NO_NOTES_LINE,
 )
 from client.gamepad import GamepadWatcher, describe_combo
 from client.listen import play_confirm_tone, play_stop_tone, preload_vad_model, record_until_silence
@@ -112,6 +113,16 @@ def _wait_for_game_or_trigger(settings, triggers) -> tuple[str | None, object | 
         if fired is not None:
             return None, fired
         time.sleep(settings.game_detect_poll_seconds)
+
+
+def _announce_game(settings, name: str) -> None:
+    """Printed on every newly detected game; plus a spoken warning when the
+    game runs as administrator and this client doesn't (keys would be
+    invisible to it - see capture.foreground_game_needs_admin())."""
+    print(f"  Jogo detectado: {name}")
+    if foreground_game_needs_admin(settings.game_aliases_path):
+        print(f"  ATENÇÃO: {GAME_NEEDS_ADMIN_MESSAGE}")
+        play_line("game_needs_admin", fallback_tone=False)
 
 
 def resolve_active_game_by_voice(settings, session: ServerSession) -> tuple[str | None, bool]:
@@ -371,7 +382,7 @@ def cmd_ask(_args: argparse.Namespace) -> int:
         detected = detect_game(settings.game_aliases_path)
         if detected:
             if detected != active_game:
-                print(f"  Jogo detectado: {detected}")
+                _announce_game(settings, detected)
             active_game = detected
             game = active_game
         elif active_game:
@@ -381,7 +392,7 @@ def cmd_ask(_args: argparse.Namespace) -> int:
             if found:
                 active_game = found
                 game = found
-                print(f"  Jogo detectado: {found}")
+                _announce_game(settings, found)
             else:
                 resolved, is_freeform = resolve_active_game_by_voice(settings, session)
                 if resolved:

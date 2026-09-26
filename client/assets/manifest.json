@@ -9,5 +9,6 @@
   "game_unresolved": "Não consegui identificar o jogo por voz. Aperte F8 ou F6 pra tentar de novo.",
   "note_saved": "Anotado.",
   "no_notes": "Não consegui uma resposta confiável pra isso agora. Pode tentar de novo com outra pergunta, ou me contar a resposta com F6 que eu guardo pra próxima vez.",
-  "closing_ack": "Beleza! Qualquer coisa, é só chamar."
+  "closing_ack": "Beleza! Qualquer coisa, é só chamar.",
+  "game_needs_admin": "Atenção: o jogo está rodando como administrador, então o Windows não me deixa ouvir as teclas. Feche o Parça e abra de novo com o botão direito no ícone, em Executar como administrador."
 }
