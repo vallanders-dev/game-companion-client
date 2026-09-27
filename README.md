@@ -15,8 +15,9 @@ Você precisa de um **token de testador**, fornecido por quem organiza o beta.
    computador", clique em **Mais informações** e depois em **Executar assim
    mesmo**. A instalação leva alguns minutos e cria o ícone **Parça** na
    área de trabalho.
-4. O Parça abre sozinho no final. Na janela que aparecer, **cole o seu
-   token** e clique em **Conectar**. Pronto!
+4. O Parça abre sozinho no final. Na janela que aparecer, escolha o
+   **idioma** e a **voz** (o botão **Ouvir** toca uma amostra), **cole o
+   seu token** e clique em **Conectar**. Pronto!
 
 O token fica salvo no seu usuário do Windows. É só seu: não compartilhe.
 
@@ -42,6 +43,14 @@ Dicas importantes:
   Parça se reconecta sozinho.
 - Deixe só **um** Parça aberto. Se abrir outro, ele avisa e fecha sozinho.
 
+## Idioma e voz
+
+O Parça fala **português** (vozes Raquel e Yuri) ou **inglês** (Lily,
+Ivanna e Hale). O idioma vale pra conversa inteira: ele entende e responde
+nesse idioma. Pra trocar, use o ícone **Parça - Configurações** na área de
+trabalho (criado na primeira vez que o Parça abre). Se o Parça estiver
+aberto, a nova voz vale a partir da próxima pergunta.
+
 ## Atualizações
 
 Toda vez que você abre o Parça ele verifica se há uma versão nova e se
@@ -50,11 +59,27 @@ atualiza sozinho.
 ## Trocar de token
 
 Se o servidor recusar o seu token, a janela aparece de novo. Para trocar
-manualmente, apague o arquivo `%APPDATA%\Parca\settings.json` e abra o
-Parça de novo.
+manualmente, abra o ícone **Parça - Configurações** e cole o token novo.
 
 ## Instalando pelo Git (opcional)
 
 Quem preferir: `git clone` este repositório, crie um ambiente com
 `python -m venv .venv`, rode `.venv\Scripts\pip install -r requirements.txt`
 e abra pelo `Parca.cmd`. As atualizações chegam do mesmo jeito.
+
+---
+
+## English
+
+Parça also speaks **English** (voices Lily, Ivanna and Hale): it understands
+you and answers in English. Install it the same way (steps above: Python with
+"Add python.exe to PATH" ticked, then the `instalar-parca.cmd` link). In the
+window that opens, pick **English** as the language, choose a voice
+(**Listen** plays a sample), paste your tester token and click **Connect**.
+
+- **F8**: ask by voice · **F6**: save a note (it asks you to confirm) ·
+  press either while it talks to interrupt
+- Say "thanks" or "got it" to wrap up; "tell me everything" unlocks spoilers
+- If your game runs as administrator, right-click the **Parça** icon and
+  choose **Run as administrator**
+- Change language or voice any time with the **Parça - Configurações** icon

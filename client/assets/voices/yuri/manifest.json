@@ -1,0 +1,18 @@
+{
+  "filler_1": "Deixa eu ver...",
+  "filler_2": "Só um instante...",
+  "filler_3": "Verificando...",
+  "filler_4": "Hmm, deixa eu olhar aqui...",
+  "cap_reached": "O limite diário de chamadas do teste foi atingido. Amanhã ele reseta sozinho; até lá eu não consigo responder.",
+  "game_ask": "Não identifiquei o jogo automaticamente. Qual jogo você está jogando?",
+  "game_reask": "Não reconheci. Qual jogo você está jogando?",
+  "game_unresolved": "Não consegui identificar o jogo por voz. Aperte F8 ou F6 pra tentar de novo.",
+  "note_saved": "Anotado.",
+  "game_needs_admin": "Atenção: o jogo está rodando como administrador, então o Windows não me deixa ouvir as teclas. Feche o Parça e abra de novo com o botão direito no ícone, em Executar como administrador.",
+  "web_search": "Deixa eu pesquisar isso rapidinho.",
+  "web_search_still": "Tô quase lá, só mais um instante.",
+  "already_running": "O Parça já está aberto em outra janela. Feche a outra antes de abrir de novo.",
+  "sample": "Oi! Eu sou o Parça. É só apertar F8 e me perguntar o que quiser sobre o seu jogo.",
+  "no_notes": "Não consegui uma resposta confiável pra isso agora. Pode tentar de novo com outra pergunta, ou me contar a resposta com F6 que eu guardo pra próxima vez.",
+  "closing_ack": "Beleza! Qualquer coisa, é só chamar."
+}

@@ -40,9 +40,10 @@ def _unpack_audio_frame(frame: bytes) -> tuple[int, bytes]:
 
 
 class ServerSession:
-    def __init__(self, server_url: str, token: str) -> None:
+    def __init__(self, server_url: str, token: str, voice: str | None = None) -> None:
         self.server_url = server_url
         self.token = token
+        self.voice = voice
         self.display_name = ""
         self._ws = None
 
@@ -106,6 +107,12 @@ class ServerSession:
                 if attempt == 2:
                     raise ServerError(f"conexão com o servidor perdida: {exc}") from exc
 
+    def _voice_field(self) -> dict:
+        # The voice key (client/voices.py) picks the server's voice AND the
+        # conversation's language; left out when unset, so the server keeps
+        # its default (Raquel, Portuguese) exactly as for older clients.
+        return {"voice": self.voice} if self.voice else {}
+
     # -- ask turn ---------------------------------------------------------------
     def ask(
         self,
@@ -147,6 +154,7 @@ class ServerSession:
         msg: dict = {
             "type": "turn_start", "turn_id": turn_id, "kind": "ask", "game": game,
             "has_screenshot": screenshot_bytes is not None, "has_audio": wav_bytes is not None,
+            **self._voice_field(),
         }
         if question_text is not None:
             msg["question_text"] = question_text
@@ -232,6 +240,7 @@ class ServerSession:
         msg = {
             "type": "turn_start", "turn_id": turn_id, "kind": "remember", "game": game,
             "has_screenshot": screenshot_bytes is not None, "has_audio": True,
+            **self._voice_field(),
         }
         frames: list = [json.dumps(msg)]
         if screenshot_bytes is not None:
@@ -297,7 +306,8 @@ class ServerSession:
         method only replaces the local Scribe call with a network one.
         Returns `(text, error)`, same contract as the server function."""
         request_id = f"stt-{id(wav_bytes)}-{threading.get_ident()}"
-        self._send_opening([json.dumps({"type": "stt_request", "request_id": request_id, "has_audio": True}),
+        self._send_opening([json.dumps({"type": "stt_request", "request_id": request_id, "has_audio": True,
+                                        **self._voice_field()}),
                             wav_bytes])
         while True:
             try:

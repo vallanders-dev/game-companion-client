@@ -12,13 +12,13 @@ import random
 import threading
 import time
 
-from client.fixed_lines import FILLER_LINES, asset_path
+from client.fixed_lines import asset_path
 from client.listen import play_stop_tone
 from client.speech import AudioOut, read_pcm_wav
 
 
-def load_line(name: str) -> bytes | None:
-    path = asset_path(name)
+def load_line(name: str, voice: str = "raquel") -> bytes | None:
+    path = asset_path(name, voice)
     if not path.exists():
         return None
     try:
@@ -27,12 +27,12 @@ def load_line(name: str) -> bytes | None:
         return None
 
 
-def play_line(name: str, *, fallback_tone: bool = True) -> bool:
+def play_line(name: str, voice: str = "raquel", *, fallback_tone: bool = True) -> bool:
     """Speaks a baked line, blocking until it finishes. Returns False if the
     asset is missing/unreadable - then plays the local stop tone instead
     when ``fallback_tone`` (the original app's fallback for an uncached
     fixed line), so a player not watching the console still hears something."""
-    pcm = load_line(name)
+    pcm = load_line(name, voice)
     if pcm is None:
         if fallback_tone:
             play_stop_tone()
@@ -48,12 +48,12 @@ def play_line(name: str, *, fallback_tone: bool = True) -> bool:
     return True
 
 
-def load_fillers() -> list[bytes]:
+def load_fillers(voice: str = "raquel") -> list[bytes]:
     fillers = []
-    for n in range(1, len(FILLER_LINES) + 1):
-        pcm = load_line(f"filler_{n}")
-        if pcm is not None:
-            fillers.append(pcm)
+    n = 1
+    while (pcm := load_line(f"filler_{n}", voice)) is not None:
+        fillers.append(pcm)
+        n += 1
     return fillers
 
 

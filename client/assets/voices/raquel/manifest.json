@@ -13,5 +13,6 @@
   "game_needs_admin": "Atenção: o jogo está rodando como administrador, então o Windows não me deixa ouvir as teclas. Feche o Parça e abra de novo com o botão direito no ícone, em Executar como administrador.",
   "web_search": "Deixa eu pesquisar isso rapidinho.",
   "web_search_still": "Tô quase lá, só mais um instante.",
-  "already_running": "O Parça já está aberto em outra janela. Feche a outra antes de abrir de novo."
+  "already_running": "O Parça já está aberto em outra janela. Feche a outra antes de abrir de novo.",
+  "sample": "Oi! Eu sou o Parça. É só apertar F8 e me perguntar o que quiser sobre o seu jogo."
 }

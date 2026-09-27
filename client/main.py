@@ -53,15 +53,13 @@ from client.capture import (
     prompt_scene,
     resolve_spoken_game,
 )
-from client.config import load_client_settings, save_token
+from client import texts, voices
+from client.config import load_client_settings, load_saved_voice, save_token
 from client.fixed_audio import (
     FillerPlayer, load_fillers, load_line, mark_answer_started, play_before_answer, play_line,
 )
-from client.fixed_lines import (
-    ALREADY_RUNNING_MESSAGE, CAP_REACHED_MESSAGE, CLOSING_LINE, GAME_ASK_MESSAGE, GAME_ASK_REASK_MESSAGE,
-    GAME_NEEDS_ADMIN_MESSAGE, GAME_UNRESOLVED_MESSAGE, NO_NOTES_BAKED_HOTKEY, NO_NOTES_LINE,
-    WEB_SEARCH_STILL_AFTER,
-)
+from client.fixed_lines import CLOSING_LINE, NO_NOTES_BAKED_HOTKEY, NO_NOTES_LINE, WEB_SEARCH_STILL_AFTER
+from client.texts import t
 from client.gamepad import GamepadWatcher, describe_combo
 from client.listen import play_confirm_tone, play_stop_tone, preload_vad_model, record_until_silence
 from client.net import AuthError, ServerError, ServerSession
@@ -69,6 +67,16 @@ from client.speech import AudioOut
 from client.updater import check_for_update
 
 _VERBOSE = True
+# The picked voice (client/voices.py key): which baked lines play, and - via
+# its language - the console text and what the server speaks and hears.
+# Set in cmd_ask(), re-read between turns so the settings window applies live.
+_voice = voices.DEFAULT_VOICE
+
+
+def _set_voice(key: str) -> None:
+    global _voice
+    _voice = voices.get(key).key
+    texts.set_language(voices.get(_voice).language)
 
 
 def telemetry(line: str) -> None:
@@ -122,10 +130,10 @@ def _announce_game(settings, name: str) -> None:
     """Printed on every newly detected game; plus a spoken warning when the
     game runs as administrator and this client doesn't (keys would be
     invisible to it - see capture.foreground_game_needs_admin())."""
-    print(f"  Jogo detectado: {name}")
+    print(t("game_detected", name=name))
     if foreground_game_needs_admin(settings.game_aliases_path):
-        print(f"  ATENÇÃO: {GAME_NEEDS_ADMIN_MESSAGE}")
-        play_line("game_needs_admin", fallback_tone=False)
+        print(t("attention", text=texts.spoken("game_needs_admin")))
+        play_line("game_needs_admin", _voice, fallback_tone=False)
 
 
 def resolve_active_game_by_voice(settings, session: ServerSession) -> tuple[str | None, bool]:
@@ -138,10 +146,11 @@ def resolve_active_game_by_voice(settings, session: ServerSession) -> tuple[str 
     or the server's cap blocked the STT call."""
     known = _known_game_names(settings)
     for attempt in (1, 2):
-        print(f"  {GAME_ASK_MESSAGE if attempt == 1 else GAME_ASK_REASK_MESSAGE}")
+        line = "game_ask" if attempt == 1 else "game_reask"
+        print(f"  {texts.spoken(line)}")
         # Spoken, not just printed: the player is looking at the game, not
         # the console. The first client cut only printed this - a real gap.
-        play_line("game_ask" if attempt == 1 else "game_reask", fallback_tone=False)
+        play_line(line, _voice, fallback_tone=False)
         wav = _record(settings)
         if not wav:
             continue
@@ -217,7 +226,7 @@ def _speak_line(name: str, barge: "BargeInWatcher | None", *, fallback_tone: boo
     confirmation. Returns the trigger that interrupted it (handled by the
     loop as its next command, like any barge-in) or None. Without barge-in
     (BARGE_IN=false) it plays through, as before."""
-    pcm = load_line(name)
+    pcm = load_line(name, _voice)
     if pcm is None:
         if fallback_tone:
             play_stop_tone()
@@ -247,17 +256,17 @@ def _remember_note(session: ServerSession, settings, game: str, barge: "BargeInW
     for the `on_state("ouvindo")` -> record -> `turn_continue` protocol.
     Returns a trigger pressed during the closing line (the loop's next
     command), or None."""
-    print(f"  Anotando uma nota pessoal para '{game}'...")
+    print(t("noting", game=game))
     screenshot = None
     try:
         screenshot = capture_game_window_jpeg(settings.game_aliases_path)
     except Exception as exc:  # noqa: BLE001
         telemetry(f"  (captura falhou: {exc})")
 
-    print(f"  Fale o que quer anotar (para sozinho após {settings.mic_silence_hang:.1f}s de silêncio)...")
+    print(t("speak_note", hang=settings.mic_silence_hang))
     wav = _record(settings)
     if not wav:
-        print("  (não entendi a nota — nada foi salvo; aperte F6 pra tentar de novo)")
+        print(t("note_not_heard_retry"))
         play_stop_tone()
         return
 
@@ -267,10 +276,10 @@ def _remember_note(session: ServerSession, settings, game: str, barge: "BargeInW
     try:
         audio_out.open()
     except Exception as exc:  # noqa: BLE001
-        print(f"  (sem saída de áudio: {exc})")
+        print(t("no_audio_out", error=exc))
 
     def record_reply() -> bytes | None:
-        print("  Responda por voz: sim ou não...")
+        print(t("answer_yes_no"))
         return _record(settings)
 
     def on_audio(pcm: bytes, _turn_seq: int) -> None:
@@ -282,25 +291,25 @@ def _remember_note(session: ServerSession, settings, game: str, barge: "BargeInW
             cancel=cancel, on_audio=on_audio,
         )
     except ServerError as exc:
-        print(f"  ERRO: {exc}")
+        print(t("error", error=exc))
         audio_out.close()
         return
     audio_out.close(drain=True)
 
     outcome = result.get("outcome")
     if outcome == "note_saved":
-        print(f'  Anotado: "{result.get("answer_text", "")}"')
+        print(t("note_saved", text=result.get("answer_text", "")))
         play_confirm_tone()
         return _speak_line("note_saved", barge, fallback_tone=False)
     if outcome == "note_discarded":
         reason = result.get("stats", {}).get("reason", "")
-        print(f"  Nota descartada ({reason}).")
+        print(t("note_discarded", reason=reason))
         play_stop_tone()
     elif outcome == "note_empty":
-        print("  (não entendi a nota — nada foi salvo)")
+        print(t("note_not_heard"))
         play_stop_tone()
     elif outcome == "cap_reached":
-        print(f"  {CAP_REACHED_MESSAGE} (nota não salva)")
+        print(t("note_cap", text=texts.spoken("cap_reached")))
         return _speak_line("cap_reached", barge)
     else:
         telemetry(f"  (resultado inesperado: {outcome})")
@@ -318,7 +327,7 @@ def _ask_for_token(reason: str) -> bool:
         code = 2
     if code in (0, 1):
         return code == 0
-    token = _prompt("Cole o seu token de testador: ").replace("SERVER_AUTH_TOKEN=", "").strip()
+    token = _prompt(t("paste_token")).replace("SERVER_AUTH_TOKEN=", "").strip()
     if token:
         save_token(token)
     return bool(token)
@@ -326,13 +335,15 @@ def _ask_for_token(reason: str) -> bool:
 
 def cmd_ask(_args: argparse.Namespace) -> int:
     settings = load_client_settings()
+    _set_voice(settings.voice)
     if not settings.server_auth_token and not _ask_for_token("missing"):
-        print("Sem token de testador - até a próxima!")
+        print(t("no_token_bye"))
         return 1
-    settings = load_client_settings()
-    print(f"Conectando a {settings.server_url}...")
+    settings = load_client_settings()  # the first-launch window also picks the voice
+    _set_voice(settings.voice)
+    print(t("connecting", url=settings.server_url))
     while True:
-        session = ServerSession(settings.server_url, settings.server_auth_token)
+        session = ServerSession(settings.server_url, settings.server_auth_token, voice=_voice)
         try:
             display_name = session.connect()
             break
@@ -341,14 +352,14 @@ def cmd_ask(_args: argparse.Namespace) -> int:
             # instead of just failing. A token from client/.env (development)
             # is the developer's to fix, not a window's.
             if os.environ.get("SERVER_AUTH_TOKEN") or not _ask_for_token("rejected"):
-                print("ERRO: o servidor não aceitou o token de testador.")
+                print(t("token_rejected"))
                 return 1
             settings = load_client_settings()
         except ServerError as exc:
-            print(f"ERRO: {exc}")
-            print("  (servidor fora do ar ou sem internet - tente de novo em instantes)")
+            print(t("error", error=exc).strip())
+            print(t("server_down"))
             return 1
-    print(f"Conectado como '{display_name}'.")
+    print(t("connected", name=display_name))
 
     preload_vad_model()
     manager = HotkeyManager(settings.capture_hotkey)
@@ -356,32 +367,42 @@ def cmd_ask(_args: argparse.Namespace) -> int:
     gamepad = GamepadWatcher(settings.gamepad_combo)
     all_triggers = [manager, remember_manager] + ([gamepad] if gamepad.available else [])
 
-    print(f"Hotkey: {_fmt(manager.hotkey)}  ->  screenshot + grava a pergunta falada")
-    print(f"Hotkey: {_fmt(remember_manager.hotkey)}  ->  anota uma nota pessoal (não responde)")
+    print(t("hotkey_ask", key=_fmt(manager.hotkey)))
+    print(t("hotkey_note", key=_fmt(remember_manager.hotkey)))
     if gamepad.available:
-        print(f"Controle: segure {describe_combo(gamepad.combo)} — mesma ação do hotkey de pergunta")
-    print(
-        "  Dica: rode o jogo em 'janela sem bordas' / 'fullscreen em janela'. Em\n"
-        "  fullscreen exclusivo o hotkey global pode não ser detectado."
-    )
+        print(t("gamepad", combo=describe_combo(gamepad.combo)))
+    print(t("tip"))
 
     # All three triggers, as in the original app: F6 mid-answer interrupts
     # and goes straight to taking a note (pending_fired carries which one).
     # The first client cut watched F8/gamepad only - F6 did nothing.
     barge = BargeInWatcher(all_triggers) if settings.barge_in else None
 
-    fillers = None
-    if settings.filler_enabled:
-        fillers = FillerPlayer(load_fillers(), settings.filler_delay_ms / 1000.0)
-        if not fillers.enabled:
+    def make_fillers():
+        if not settings.filler_enabled:
+            return None
+        player = FillerPlayer(load_fillers(_voice), settings.filler_delay_ms / 1000.0)
+        if not player.enabled:
             telemetry("  (sem áudio de filler em client/assets - rode "
                       "`python -m server.tools.bake_fixed_audio`)")
-            fillers = None
+            return None
+        return player
+
+    fillers = make_fillers()
 
     active_game: str | None = None
     pending_fired = None
 
     while True:
+        # A voice picked in the settings window ("Parça - Configurações")
+        # while this copy runs applies from the next turn on.
+        saved_voice = load_saved_voice()
+        if saved_voice != _voice:
+            _set_voice(saved_voice)
+            session.voice = _voice
+            fillers = make_fillers()
+            print(t("voice_changed", name=voices.get(_voice).name))
+
         detected = detect_game(settings.game_aliases_path)
         if detected:
             if detected != active_game:
@@ -401,26 +422,22 @@ def cmd_ask(_args: argparse.Namespace) -> int:
                 if resolved:
                     active_game = resolved
                     game = resolved
-                    label = "sem conteúdo curado" if is_freeform else "confirmado por voz"
-                    print(f"  Jogo ({label}): {resolved}")
+                    print(t("game_by_voice_free" if is_freeform else "game_by_voice", name=resolved))
                 else:
-                    print(f"  {GAME_UNRESOLVED_MESSAGE}")
-                    play_line("game_unresolved")
+                    print(f"  {texts.spoken('game_unresolved')}")
+                    play_line("game_unresolved", _voice)
                     print("-" * 48)
-                    prompt_scene(all_triggers, "Aperte F8 ou F6 pra tentar de novo: ")
+                    prompt_scene(all_triggers, t("retry_prompt"))
                     continue
 
         def _foreground_game_changed() -> bool:
             return detect_game(settings.game_aliases_path) not in (None, active_game)
 
-        scene_prompt = (
-            f"Cena — {_fmt(manager.hotkey)} pra perguntar por voz, {_fmt(remember_manager.hotkey)} "
-            "pra anotar algo, digite a cena, ou digite 'jogo' pra escolher o jogo manualmente: "
-        )
+        scene_prompt = t("scene_prompt", ask=_fmt(manager.hotkey), note=_fmt(remember_manager.hotkey))
         if pending_fired is not None:
             scene, fired = "", pending_fired
             pending_fired = None
-            print(f"  (interrompido — {'anotar' if fired is remember_manager else 'nova pergunta'})")
+            print(t("interrupted_note" if fired is remember_manager else "interrupted_ask"))
         else:
             scene, fired = prompt_scene(
                 all_triggers, scene_prompt,
@@ -432,9 +449,9 @@ def cmd_ask(_args: argparse.Namespace) -> int:
             continue
 
         if fired is None and scene.strip().lower() == "jogo":
-            new_game = _prompt("Jogo: ")
+            new_game = _prompt(t("game_prompt"))
             if not new_game:
-                print("Até a próxima!")
+                print(t("bye"))
                 session.close()
                 return 0
             active_game = new_game
@@ -450,22 +467,22 @@ def cmd_ask(_args: argparse.Namespace) -> int:
         screenshot = None
         wav = None
         if used_trigger:
-            print("  Capturando a tela...")
+            print(t("capturing"))
             try:
                 screenshot = capture_game_window_jpeg(settings.game_aliases_path)
             except Exception as exc:  # noqa: BLE001
-                print("  (não consegui capturar a tela — seguindo sem ela)")
+                print(t("capture_failed"))
                 telemetry(f"  (captura falhou: {exc})")
-            print(f"  Fale a sua pergunta (para sozinho após {settings.mic_silence_hang:.1f}s de silêncio)...")
+            print(t("speak_question", hang=settings.mic_silence_hang))
             wav = _record(settings)
             if not wav:
-                print("  (sem pergunta por voz — digite abaixo)")
-                question_text = _prompt("Pergunta: ")
+                print(t("no_voice_type"))
+                question_text = _prompt(t("question_prompt"))
         else:
             question_text = scene
 
         if not wav and not question_text:
-            print("  (pergunta vazia — tente de novo)\n")
+            print(t("empty_question"))
             continue
 
         t_sent = time.perf_counter()  # recording done (silence hang included) -> request goes out
@@ -476,7 +493,7 @@ def cmd_ask(_args: argparse.Namespace) -> int:
         try:
             audio_out.open()
         except Exception as exc:  # noqa: BLE001
-            print(f"  (sem saída de áudio: {exc})")
+            print(t("no_audio_out", error=exc))
         if barge is not None:
             barge.arm(cancel, audio_out)
 
@@ -500,14 +517,14 @@ def cmd_ask(_args: argparse.Namespace) -> int:
                 if filler_timer is not None:
                     filler_timer.cancel()
                 for name, delay in (("web_search", 0.0), ("web_search_still", WEB_SEARCH_STILL_AFTER)):
-                    pcm = load_line(name)
+                    pcm = load_line(name, _voice)
                     if pcm is not None:
                         search_timers.append(play_before_answer(audio_out, cancel, pcm, delay))
 
         def on_meta(question: str, scene_text: str) -> None:
-            print(f'  Você perguntou: "{question}"')
+            print(t("you_asked", question=question))
             if scene_text:
-                print(f"  Cena detectada: {scene_text}")
+                print(t("scene_detected", scene=scene_text))
 
         def on_audio(pcm: bytes, _turn_seq: int) -> None:
             nonlocal answer_audio_started, t_first_heard
@@ -524,7 +541,7 @@ def cmd_ask(_args: argparse.Namespace) -> int:
                 cancel=cancel, on_state=on_state, on_meta=on_meta, on_audio=on_audio,
             )
         except ServerError as exc:
-            print(f"  ERRO: {exc}")
+            print(t("error", error=exc))
             for timer in [filler_timer, *search_timers]:
                 if timer is not None:
                     timer.cancel()
@@ -559,17 +576,17 @@ def cmd_ask(_args: argparse.Namespace) -> int:
         if barge is not None:
             barge.disarm()
 
-        print(f"  Companion: {result.get('answer_text', '')}")
+        print(t("answer", text=result.get("answer_text", "")))
         outcome = result.get("outcome")
         if pending_fired is None:
             # Server sends no audio for these - the client speaks them from
             # shipped assets, interruptible: a trigger pressed while one
             # plays cuts it and becomes the next command (pending_fired).
             if outcome == "cap_reached":
-                print(f"  {CAP_REACHED_MESSAGE}")
+                print(f"  {texts.spoken('cap_reached')}")
                 pending_fired = _speak_line("cap_reached", barge)
             elif outcome == "answered_no_audio":
-                print("  (sem cota pra falar a resposta — ela fica no texto acima)")
+                print(t("no_quota_voice"))
                 pending_fired = _speak_line("cap_reached", barge)
             elif outcome == "no_notes" and settings.remember_hotkey.lower() == NO_NOTES_BAKED_HOTKEY:
                 pending_fired = _speak_line(NO_NOTES_LINE, barge)
@@ -593,7 +610,7 @@ def cmd_ask(_args: argparse.Namespace) -> int:
             # a real TTS failure looked identical to "no audio for some
             # other silent reason" - found on a live pass where the tester
             # couldn't tell why a reply had no voice.
-            print(f"  (voz falhou nessa resposta: {tts_error})")
+            print(t("voice_failed", error=tts_error))
         print("-" * 48)
 
 
@@ -625,9 +642,47 @@ def _claim_single_instance() -> bool:
     return True
 
 
+SETTINGS_SHORTCUT_NAME = "Parça - Configurações.lnk"
+
+
+def _ensure_settings_shortcut() -> None:
+    """Once per installed PC: a desktop icon that opens the settings window
+    (language, voice, token) - `Parca.cmd --settings`. Installs made before
+    v0.1.6 never had it; recorded in settings.json so a tester who deletes
+    it doesn't get it back. Best-effort and silent."""
+    from client.config import _read_user_settings, save_user_settings
+    from client.updater import INSTALL_MARKER, REPO_ROOT
+
+    if not INSTALL_MARKER.exists() or _read_user_settings().get("settings_shortcut"):
+        return
+    script = (
+        "$d = [Environment]::GetFolderPath('Desktop'); $p = Join-Path $d $env:PARCA_LNK; "
+        "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($p); "
+        "$s.TargetPath = (Join-Path $env:PARCA_HOME 'Parca.cmd'); $s.Arguments = '--settings'; "
+        "$s.WorkingDirectory = $env:PARCA_HOME; $s.Save()"
+    )
+    try:
+        done = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+            env=dict(os.environ, PARCA_LNK=SETTINGS_SHORTCUT_NAME, PARCA_HOME=str(REPO_ROOT)),
+            capture_output=True, timeout=20,
+        ).returncode == 0
+    except Exception:  # noqa: BLE001
+        done = False
+    if done:
+        save_user_settings(settings_shortcut=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m client.main")
+    ap.add_argument("--settings", action="store_true",
+                    help="open the settings window (language, voice, token) and exit")
     args = ap.parse_args(argv)
+    if args.settings:
+        # Its own process, like at first launch; a running copy picks the new
+        # voice up from its next turn. Always 0, so Parca.cmd doesn't pause.
+        subprocess.call([sys.executable, "-m", "client.gui.token_dialog", "--reason", "settings"])
+        return 0
     if not os.environ.get("_GC_JUST_UPDATED") and check_for_update():
         # Run the freshly pulled code as a child in this same console (a
         # plain subprocess, not os.execv - on Windows execv detaches from
@@ -637,13 +692,15 @@ def main(argv: list[str] | None = None) -> int:
     # After the update step: a relaunching parent never gets here, so only
     # the copy that actually runs holds the lock.
     if not _claim_single_instance():
-        print(ALREADY_RUNNING_MESSAGE)
-        play_line("already_running", fallback_tone=False)
+        _set_voice(load_saved_voice())
+        print(texts.spoken("already_running"))
+        play_line("already_running", _voice, fallback_tone=False)
         return 1
+    _ensure_settings_shortcut()
     try:
         return cmd_ask(args)
     except KeyboardInterrupt:
-        print("\nAté a próxima!")
+        print("\n" + t("bye"))
         return 0
 
 

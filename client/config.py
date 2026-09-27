@@ -92,6 +92,8 @@ class ClientSettings:
     verbose_telemetry: bool
     game_detect_poll_seconds: float
     game_voice_match_min_ratio: float
+    # client/voices.py key: the voice AND the conversation's language.
+    voice: str = "raquel"
 
 
 def load_user_config() -> dict:
@@ -155,23 +157,38 @@ def resolve_gamepad_combo(user_cfg: dict | None = None) -> str:
     return from_cfg or os.environ.get("GAMEPAD_COMBO", "").strip() or DEFAULT_GAMEPAD_COMBO
 
 
-def load_saved_token() -> str:
+def _read_user_settings() -> dict:
     try:
         data = json.loads(USER_SETTINGS_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return ""
-    return str(data.get("token", "")).strip() if isinstance(data, dict) else ""
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def load_saved_token() -> str:
+    return str(_read_user_settings().get("token", "")).strip()
+
+
+def load_saved_voice() -> str:
+    """The voice picked in the settings window (client/voices.py key); the
+    default voice when none was ever picked. VOICE in client/.env overrides
+    it for development."""
+    from client import voices
+
+    return voices.get(os.environ.get("VOICE", "").strip() or _read_user_settings().get("voice")).key
+
+
+def save_user_settings(**fields) -> None:
+    """Merges `fields` into %APPDATA%/Parca/settings.json (token, voice)."""
+    USER_SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
+    data = _read_user_settings()
+    for key, value in fields.items():
+        data[key] = value.strip() if isinstance(value, str) else value
+    USER_SETTINGS_PATH.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
 def save_token(token: str) -> None:
-    USER_SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
-    try:
-        data = json.loads(USER_SETTINGS_PATH.read_text(encoding="utf-8"))
-        data = data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError):
-        data = {}
-    data["token"] = token.strip()
-    USER_SETTINGS_PATH.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    save_user_settings(token=token)
 
 
 def load_client_settings() -> ClientSettings:
@@ -181,6 +198,7 @@ def load_client_settings() -> ClientSettings:
     return ClientSettings(
         server_url=_env("SERVER_URL", DEFAULT_SERVER_URL),
         server_auth_token=os.environ.get("SERVER_AUTH_TOKEN", "").strip() or load_saved_token(),
+        voice=load_saved_voice(),
         capture_hotkey=resolve_capture_hotkey(),
         remember_hotkey=resolve_remember_hotkey(),
         gamepad_combo=resolve_gamepad_combo(),

@@ -1,0 +1,18 @@
+{
+  "filler_1": "Let me see...",
+  "filler_2": "One sec...",
+  "filler_3": "Checking...",
+  "filler_4": "Hmm, let me look...",
+  "cap_reached": "The test's daily call limit has been reached. It resets by itself tomorrow; until then I can't answer.",
+  "game_ask": "I couldn't detect your game automatically. Which game are you playing?",
+  "game_reask": "I didn't recognize that. Which game are you playing?",
+  "game_unresolved": "I couldn't identify the game by voice. Press F8 or F6 to try again.",
+  "note_saved": "Noted.",
+  "game_needs_admin": "Heads up: your game is running as administrator, so Windows won't let me hear your keys. Close Parça and open it again by right-clicking the icon and choosing Run as administrator.",
+  "web_search": "Let me look that up real quick.",
+  "web_search_still": "Almost there, just a moment.",
+  "already_running": "Parça is already open in another window. Close that one before opening it again.",
+  "sample": "Hey! I'm Parça. Just press F8 and ask me anything about your game.",
+  "no_notes": "I couldn't get a reliable answer for that right now. Try asking another way, or tell me the answer with F6 and I'll remember it next time.",
+  "closing_ack": "Sure thing! Just call me if you need anything."
+}
