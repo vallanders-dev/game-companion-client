@@ -36,6 +36,15 @@ GAME_ASK_MESSAGE = "Não identifiquei o jogo automaticamente. Qual jogo você es
 GAME_ASK_REASK_MESSAGE = "Não reconheci. Qual jogo você está jogando?"
 GAME_UNRESOLVED_MESSAGE = "Não consegui identificar o jogo por voz. Aperte F8 ou F6 pra tentar de novo."
 NOTE_SAVED_MESSAGE = "Anotado."
+# A web search takes 3-10 s before a word exists: the first line plays as
+# soon as the server says it's searching, the second only if the answer
+# still hasn't started WEB_SEARCH_STILL_AFTER seconds later.
+WEB_SEARCH_MESSAGE = "Deixa eu pesquisar isso rapidinho."
+WEB_SEARCH_STILL_MESSAGE = "Tô quase lá, só mais um instante."
+WEB_SEARCH_STILL_AFTER = 6.0
+# Spoken when a second copy of the client is opened (both would hear every
+# key press and answer twice - seen with the first tester).
+ALREADY_RUNNING_MESSAGE = "O Parça já está aberto em outra janela. Feche a outra antes de abrir de novo."
 # Spoken once per detected game when the game runs as administrator and the
 # client doesn't - Windows then hides every key press from the client.
 GAME_NEEDS_ADMIN_MESSAGE = (
@@ -60,6 +69,9 @@ LINES: dict[str, str] = {
     "game_unresolved": GAME_UNRESOLVED_MESSAGE,
     "note_saved": NOTE_SAVED_MESSAGE,
     "game_needs_admin": GAME_NEEDS_ADMIN_MESSAGE,
+    "web_search": WEB_SEARCH_MESSAGE,
+    "web_search_still": WEB_SEARCH_STILL_MESSAGE,
+    "already_running": ALREADY_RUNNING_MESSAGE,
 }
 
 

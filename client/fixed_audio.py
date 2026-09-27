@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import random
 import threading
+import time
 
 from client.fixed_lines import FILLER_LINES, asset_path
 from client.listen import play_stop_tone
@@ -80,34 +81,47 @@ class FillerPlayer:
         choices = [i for i in range(len(self._fillers)) if i != self._last] or [0]
         idx = self._rng.choice(choices)
         self._last = idx
-        pcm = self._fillers[idx]
+        return play_before_answer(out, cancel, self._fillers[idx], self._delay)
 
-        def fire() -> None:
-            if cancel.is_set():
-                return
-            # Never overlap/precede the 440 Hz stop-recording cue, which plays
-            # through sounddevice's convenience stream (see the original app).
-            try:
-                import sounddevice as sd
 
-                sd.wait()
-            except Exception:  # noqa: BLE001
-                pass
+def play_before_answer(out: AudioOut, cancel: threading.Event, pcm: bytes, delay_s: float) -> threading.Timer:
+    """Plays `pcm` after `delay_s` unless the answer has started by then -
+    the filler rule, shared by the fillers and the web-search lines. The
+    decision is taken under ``AudioOut.lock`` (see ``mark_answer_started()``),
+    so a line can never start after or over the answer; a line due while
+    another one is still playing waits for it rather than overlapping."""
+
+    def fire() -> None:
+        if cancel.is_set():
+            return
+        # Never overlap/precede the 440 Hz stop-recording cue, which plays
+        # through sounddevice's convenience stream (see the original app).
+        try:
+            import sounddevice as sd
+
+            sd.wait()
+        except Exception:  # noqa: BLE001
+            pass
+        while True:
             with out.lock:
                 if out.answer_started.is_set() or cancel.is_set() or not out.is_open:
                     return
-                out.filler_in_progress = True
-            try:
-                out.write(pcm, cancel)
-            finally:
-                with out.lock:
-                    out.filler_in_progress = False
-                out.filler_done.set()
+                if not out.filler_in_progress:
+                    out.filler_in_progress = True
+                    out.filler_done.clear()
+                    break
+            time.sleep(0.05)
+        try:
+            out.write(pcm, cancel)
+        finally:
+            with out.lock:
+                out.filler_in_progress = False
+            out.filler_done.set()
 
-        timer = threading.Timer(self._delay, fire)
-        timer.daemon = True
-        timer.start()
-        return timer
+    timer = threading.Timer(delay_s, fire)
+    timer.daemon = True
+    timer.start()
+    return timer
 
 
 def mark_answer_started(out: AudioOut, cancel: threading.Event) -> bool:

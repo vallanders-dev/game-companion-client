@@ -54,10 +54,13 @@ from client.capture import (
     resolve_spoken_game,
 )
 from client.config import load_client_settings, save_token
-from client.fixed_audio import FillerPlayer, load_fillers, load_line, mark_answer_started, play_line
+from client.fixed_audio import (
+    FillerPlayer, load_fillers, load_line, mark_answer_started, play_before_answer, play_line,
+)
 from client.fixed_lines import (
-    CAP_REACHED_MESSAGE, CLOSING_LINE, GAME_ASK_MESSAGE, GAME_ASK_REASK_MESSAGE, GAME_NEEDS_ADMIN_MESSAGE,
-    GAME_UNRESOLVED_MESSAGE, NO_NOTES_BAKED_HOTKEY, NO_NOTES_LINE,
+    ALREADY_RUNNING_MESSAGE, CAP_REACHED_MESSAGE, CLOSING_LINE, GAME_ASK_MESSAGE, GAME_ASK_REASK_MESSAGE,
+    GAME_NEEDS_ADMIN_MESSAGE, GAME_UNRESOLVED_MESSAGE, NO_NOTES_BAKED_HOTKEY, NO_NOTES_LINE,
+    WEB_SEARCH_STILL_AFTER,
 )
 from client.gamepad import GamepadWatcher, describe_combo
 from client.listen import play_confirm_tone, play_stop_tone, preload_vad_model, record_until_silence
@@ -478,6 +481,7 @@ def cmd_ask(_args: argparse.Namespace) -> int:
             barge.arm(cancel, audio_out)
 
         filler_timer = None
+        search_timers: list = []
         answer_audio_started = False
 
         def on_state(state: str) -> None:
@@ -488,6 +492,17 @@ def cmd_ask(_args: argparse.Namespace) -> int:
             # filler (the Kimi call), so FILLER_DELAY_MS means the same thing.
             if state == "pensando" and fillers is not None and filler_timer is None:
                 filler_timer = fillers.arm(audio_out, cancel)
+            # "pesquisando": no notes, the server is searching the web (3-10 s
+            # of silence otherwise). Say so now - instead of a filler not yet
+            # played - and once more if it drags on. Both give way to the
+            # answer the moment it starts.
+            elif state == "pesquisando" and not search_timers:
+                if filler_timer is not None:
+                    filler_timer.cancel()
+                for name, delay in (("web_search", 0.0), ("web_search_still", WEB_SEARCH_STILL_AFTER)):
+                    pcm = load_line(name)
+                    if pcm is not None:
+                        search_timers.append(play_before_answer(audio_out, cancel, pcm, delay))
 
         def on_meta(question: str, scene_text: str) -> None:
             print(f'  Você perguntou: "{question}"')
@@ -510,17 +525,19 @@ def cmd_ask(_args: argparse.Namespace) -> int:
             )
         except ServerError as exc:
             print(f"  ERRO: {exc}")
-            if filler_timer is not None:
-                filler_timer.cancel()
+            for timer in [filler_timer, *search_timers]:
+                if timer is not None:
+                    timer.cancel()
             if barge is not None:
                 barge.disarm()
             audio_out.close()
             print("-" * 48)
             continue
-        if filler_timer is not None:
-            # A turn with no answer audio (no-notes, cap) must not get a
-            # filler after the fact announcing an answer that isn't coming.
-            filler_timer.cancel()
+        # A turn with no answer audio (no-notes, cap) must not get a filler
+        # or search line after the fact announcing an answer that isn't coming.
+        for timer in [filler_timer, *search_timers]:
+            if timer is not None:
+                timer.cancel()
 
         # Disarm AFTER playback finishes draining, not right when the
         # network turn ends (`session.ask()` returning just means
@@ -580,6 +597,34 @@ def cmd_ask(_args: argparse.Namespace) -> int:
         print("-" * 48)
 
 
+_INSTANCE_MUTEX = None  # held for the whole process lifetime
+
+
+def _claim_single_instance() -> bool:
+    """False if another copy of the client is already running in this
+    Windows session. Two copies both hook F8/F6 and answer every question
+    twice, over each other, at double the cost - exactly what the first
+    tester's session did (the installer's own launch plus the desktop icon).
+    A named mutex; an ACCESS_DENIED answer means an elevated copy owns it.
+    Anything unexpected lets the client start."""
+    global _INSTANCE_MUTEX
+    try:
+        import ctypes
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateMutexW.restype = ctypes.c_void_p
+        handle = k32.CreateMutexW(None, False, "Local\\ParcaClient")
+        err = ctypes.get_last_error()
+    except Exception:  # noqa: BLE001 - not Windows, ctypes failure
+        return True
+    if not handle:
+        return err != 5  # ERROR_ACCESS_DENIED
+    if err == 183:  # ERROR_ALREADY_EXISTS
+        return False
+    _INSTANCE_MUTEX = handle
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m client.main")
     args = ap.parse_args(argv)
@@ -589,6 +634,12 @@ def main(argv: list[str] | None = None) -> int:
         # the console). The flag stops the child from checking again.
         env = dict(os.environ, _GC_JUST_UPDATED="1")
         return subprocess.call([sys.executable, "-m", "client.main", *(argv or [])], env=env)
+    # After the update step: a relaunching parent never gets here, so only
+    # the copy that actually runs holds the lock.
+    if not _claim_single_instance():
+        print(ALREADY_RUNNING_MESSAGE)
+        play_line("already_running", fallback_tone=False)
+        return 1
     try:
         return cmd_ask(args)
     except KeyboardInterrupt:

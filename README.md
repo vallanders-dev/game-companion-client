@@ -40,6 +40,7 @@ Dicas importantes:
   jogo está em foco, e o F8/F6 não fazem nada.
 - Se a internet cair ou o servidor reiniciar, é só perguntar de novo: o
   Parça se reconecta sozinho.
+- Deixe só **um** Parça aberto. Se abrir outro, ele avisa e fecha sozinho.
 
 ## Atualizações
 

@@ -10,5 +10,8 @@
   "note_saved": "Anotado.",
   "no_notes": "Não consegui uma resposta confiável pra isso agora. Pode tentar de novo com outra pergunta, ou me contar a resposta com F6 que eu guardo pra próxima vez.",
   "closing_ack": "Beleza! Qualquer coisa, é só chamar.",
-  "game_needs_admin": "Atenção: o jogo está rodando como administrador, então o Windows não me deixa ouvir as teclas. Feche o Parça e abra de novo com o botão direito no ícone, em Executar como administrador."
+  "game_needs_admin": "Atenção: o jogo está rodando como administrador, então o Windows não me deixa ouvir as teclas. Feche o Parça e abra de novo com o botão direito no ícone, em Executar como administrador.",
+  "web_search": "Deixa eu pesquisar isso rapidinho.",
+  "web_search_still": "Tô quase lá, só mais um instante.",
+  "already_running": "O Parça já está aberto em outra janela. Feche a outra antes de abrir de novo."
 }
