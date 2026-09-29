@@ -14,6 +14,7 @@ at 35%/30% of the box reaches its farthest corner at ~1.91 radii).
 from __future__ import annotations
 
 import math
+import sys
 
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QRadialGradient
@@ -101,3 +102,18 @@ def sphere_image(size: int, color: str = ACCENT, glow: float = 0.0) -> QImage:
     draw_sphere(p, QPointF(size / 2, size / 2), r, QColor(color), glow=glow)
     p.end()
     return img
+
+
+def claim_taskbar_identity() -> None:
+    """Call before any window exists. Parça runs under pythonw.exe, so
+    Windows would group its windows under Python in the taskbar and show
+    Python's icon (seen on the first real install, 2026-09-29). Its own
+    AppUserModelID makes the taskbar use Parça's window icon instead."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Parca.Desktop")
+    except (OSError, AttributeError):
+        pass

@@ -13,8 +13,8 @@ Você precisa de um **token de testador**, fornecido por quem organiza o beta.
    [instalar-parca.cmd](https://github.com/vallanders-dev/game-companion-client/releases/latest/download/instalar-parca.cmd)
 3. **Dê dois cliques nele.** Se o Windows mostrar "O Windows protegeu o
    computador", clique em **Mais informações** e depois em **Executar assim
-   mesmo**. A instalação leva alguns minutos e cria o ícone **Parça** na
-   área de trabalho.
+   mesmo**. A instalação leva alguns minutos, coloca o **Parça** no menu
+   Iniciar e pergunta se você quer um ícone na área de trabalho.
 4. O Parça abre sozinho no final. Na janela que aparecer, escolha o
    **idioma** e a **voz** (o botão **Ouvir** toca uma amostra), **cole o
    seu token** e clique em **Conectar**. Pronto!
@@ -23,7 +23,7 @@ O token fica salvo no seu usuário do Windows. É só seu: não compartilhe.
 
 ## Como usar
 
-Abra pelo ícone **Parça** na área de trabalho. Aparece a janela do Parça
+Abra o **Parça** pelo menu Iniciar (ou pelo ícone na área de trabalho). Aparece a janela do Parça
 (status, jogo detectado, perguntas restantes do dia). Pode fechar ou
 minimizar: ele continua rodando na **bandeja do Windows**, perto do relógio.
 Clique no ícone da bandeja para abrir a janela de novo, **pausar** o Parça
@@ -41,8 +41,8 @@ Dicas importantes:
 - Rode o jogo em **janela sem bordas** ou **tela cheia em janela**. Em tela
   cheia exclusiva as teclas podem não ser detectadas.
 - **Se o jogo roda como administrador**, abra o Parça do mesmo jeito:
-  clique com o botão direito no ícone **Parça** e escolha **Executar como
-  administrador**. Senão o Windows esconde as teclas do Parça enquanto o
+  clique com o botão direito no **Parça** (menu Iniciar ou área de trabalho) e
+  escolha **Executar como administrador**. Senão o Windows esconde as teclas do Parça enquanto o
   jogo está em foco, e o F8/F6 não fazem nada.
 - Se a internet cair ou o servidor reiniciar, é só perguntar de novo: o
   Parça se reconecta sozinho.
@@ -57,9 +57,8 @@ Dicas importantes:
 
 O Parça fala **português** (vozes Raquel e Yuri) ou **inglês** (Lily,
 Ivanna e Hale). O idioma vale pra conversa inteira: ele entende e responde
-nesse idioma. Pra trocar, use o ícone **Parça - Configurações** na área de
-trabalho (criado na primeira vez que o Parça abre). Se o Parça estiver
-aberto, a nova voz vale a partir da próxima pergunta.
+nesse idioma. Pra trocar, clique em **Configurações** na janela do Parça ou
+no ícone da bandeja. A nova voz vale a partir da próxima pergunta.
 
 ## Atualizações
 
@@ -69,7 +68,8 @@ atualiza sozinho.
 ## Trocar de token
 
 Se o servidor recusar o seu token, a janela aparece de novo. Para trocar
-manualmente, abra o ícone **Parça - Configurações** e cole o token novo.
+manualmente, clique em **Configurações** na janela do Parça (ou na bandeja)
+e cole o token novo.
 
 ## Instalando pelo Git (opcional)
 
@@ -90,8 +90,9 @@ window that opens, pick **English** as the language, choose a voice
 - **F8**: ask by voice · **F6**: save a note (it asks you to confirm) ·
   press either while it talks to interrupt
 - Say "thanks" or "got it" to wrap up; "tell me everything" unlocks spoilers
-- If your game runs as administrator, right-click the **Parça** icon and
+- If your game runs as administrator, click **Reopen as admin** on the
+  notice Parça shows, or right-click **Parça** (Start menu or desktop) and
   choose **Run as administrator**
-- Change language or voice any time with the **Parça - Configurações** icon
+- Change language or voice any time with **Settings** in the Parça window or tray
 - Closing the Parça window keeps it running in the Windows tray (near the
   clock): click the tray icon to reopen it, pause it or quit

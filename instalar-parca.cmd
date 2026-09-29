@@ -6,7 +6,8 @@ echo  ===== Instalador do Parca (beta) =====
 echo.
 
 rem Installs Parca into %LOCALAPPDATA%\Parca\app from the latest GitHub
-rem release, creates its Python environment and a desktop icon. Safe to run
+rem release, creates its Python environment, a Start menu entry and (if the
+rem tester says yes) a desktop icon. Safe to run
 rem again: it updates the files and keeps the environment. PARCA_HOME,
 rem PARCA_ZIP, PARCA_NO_SHORTCUT, PARCA_NO_LAUNCH and PARCA_NO_PAUSE exist
 rem only to test this installer; testers never set them.
@@ -53,19 +54,22 @@ if exist "%PARCA_HOME%\.venv\Scripts\python.exe" goto :have_venv
 "%PARCA_HOME%\.venv\Scripts\python.exe" -m pip install --quiet --disable-pip-version-check --upgrade pip
 "%PARCA_HOME%\.venv\Scripts\python.exe" -m pip install --quiet --disable-pip-version-check -r "%PARCA_HOME%\requirements.txt" || goto :fail
 
-echo  [4/4] Criando o atalho na area de trabalho...
+echo  [4/4] Criando os atalhos...
 if defined PARCA_NO_SHORTCUT goto :shortcut_done
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$d = [Environment]::GetFolderPath('Desktop'); $s = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $d ('Par' + [char]0x00E7 + 'a.lnk'))); $s.TargetPath = (Join-Path $env:PARCA_HOME '.venv\Scripts\pythonw.exe'); $s.Arguments = '-m client.main'; $s.WorkingDirectory = $env:PARCA_HOME; $s.IconLocation = (Join-Path $env:PARCA_HOME 'clientssets\parca.ico'); $s.Save()" || echo  Nao consegui criar o atalho. Abra o Parca pelo arquivo %PARCA_HOME%\Parca.cmd
+set "PARCA_DESKTOP=0"
+choice /C SN /N /M "  Criar um icone do Parca na area de trabalho? (S/N) "
+if not errorlevel 2 set "PARCA_DESKTOP=1"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$w = New-Object -ComObject WScript.Shell; $name = 'Par' + [char]0x00E7 + 'a.lnk'; $dirs = @([Environment]::GetFolderPath('Programs')); if ($env:PARCA_DESKTOP -eq '1') { $dirs += [Environment]::GetFolderPath('Desktop') }; foreach ($d in $dirs) { $s = $w.CreateShortcut((Join-Path $d $name)); $s.TargetPath = (Join-Path $env:PARCA_HOME '.venv\Scripts\pythonw.exe'); $s.Arguments = '-m client.main'; $s.WorkingDirectory = $env:PARCA_HOME; $s.IconLocation = (Join-Path $env:PARCA_HOME 'client\assets\parca.ico'); $s.Save() }" || echo  Nao consegui criar o atalho. Abra o Parca pelo arquivo %PARCA_HOME%\Parca.cmd
 :shortcut_done
 
 echo.
 echo  Pronto! O Parca foi instalado.
-echo  Da proxima vez, abra pelo icone "Parca" na area de trabalho.
+echo  Da proxima vez, abra o Parca pelo menu Iniciar (ou pelo icone na area de trabalho).
 if defined PARCA_NO_LAUNCH goto :end
-echo  Abrindo o Parca agora...
+echo  Abrindo o Parca agora... esta janela fecha sozinha.
 start "" /D "%PARCA_HOME%" "%PARCA_HOME%\.venv\Scripts\pythonw.exe" -m client.main
 :end
-if not defined PARCA_NO_PAUSE pause
+if not defined PARCA_NO_PAUSE timeout /t 5 >nul
 exit /b 0
 
 :fail

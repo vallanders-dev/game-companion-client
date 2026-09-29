@@ -811,7 +811,7 @@ def _claim_once() -> bool:
     return True
 
 
-SETTINGS_SHORTCUT_NAME = "Parça - Configurações.lnk"
+SETTINGS_SHORTCUT_NAME = "Parça - Configurações.lnk"  # v0.1.6-v0.1.7 only; removed by _tidy_shortcuts()
 LAUNCH_SHORTCUT_NAME = "Parça.lnk"
 ICON_PATH = ROOT / "client" / "assets" / "parca.ico"
 
@@ -835,23 +835,30 @@ def _log_without_console() -> None:
     sys.stderr = sys.stderr or stream
 
 
-def _ensure_windowed_shortcuts() -> None:
-    """Once per installed PC (2026-09-29): point the desktop icons at
-    pythonw.exe, so Parça opens as a window with no console behind it, and
-    give them the orb icon. Before, "Parça" ran Parca.cmd in a console.
-    Best-effort and silent; recorded in settings.json."""
+def _tidy_shortcuts() -> None:
+    """Once per installed PC (2026-09-29, v0.1.8): Parça has ONE icon.
+    The settings window is reached from the main window and the tray now,
+    so the old "Parça - Configurações" desktop icon is removed; a desktop
+    "Parça" icon is updated only if the tester has one (the installer asks
+    whether to create it - a tester who said no, or deleted it, doesn't get
+    it back); a Start menu entry is always kept, so Parça can be found.
+    Both launch pythonw.exe (no console) with the Parça icon. Best-effort
+    and silent; recorded in settings.json."""
     from client.config import _read_user_settings, save_user_settings
     from client.updater import INSTALL_MARKER, REPO_ROOT
 
     pythonw = REPO_ROOT / ".venv" / "Scripts" / "pythonw.exe"
     if (not INSTALL_MARKER.exists() or not pythonw.exists()
-            or _read_user_settings().get("windowed_shortcuts")):
+            or _read_user_settings().get("shortcuts_v3")):
         return
     script = (
-        "$d = [Environment]::GetFolderPath('Desktop'); $w = New-Object -ComObject WScript.Shell; "
-        "foreach ($pair in @(@($env:PARCA_LNK, '-m client.main'), @($env:PARCA_SET_LNK, '-m client.main --settings'))) { "
-        "$s = $w.CreateShortcut((Join-Path $d $pair[0])); $s.TargetPath = $env:PARCA_PYW; "
-        "$s.Arguments = $pair[1]; $s.WorkingDirectory = $env:PARCA_HOME; "
+        "$w = New-Object -ComObject WScript.Shell; "
+        "$desk = [Environment]::GetFolderPath('Desktop'); $menu = [Environment]::GetFolderPath('Programs'); "
+        "$old = Join-Path $desk $env:PARCA_SET_LNK; if (Test-Path $old) { Remove-Item $old }; "
+        "$targets = @((Join-Path $menu $env:PARCA_LNK)); "
+        "if (Test-Path (Join-Path $desk $env:PARCA_LNK)) { $targets += (Join-Path $desk $env:PARCA_LNK) }; "
+        "foreach ($t in $targets) { $s = $w.CreateShortcut($t); $s.TargetPath = $env:PARCA_PYW; "
+        "$s.Arguments = '-m client.main'; $s.WorkingDirectory = $env:PARCA_HOME; "
         "if (Test-Path $env:PARCA_ICO) { $s.IconLocation = $env:PARCA_ICO }; $s.Save() }"
     )
     try:
@@ -864,35 +871,7 @@ def _ensure_windowed_shortcuts() -> None:
     except Exception:  # noqa: BLE001
         done = False
     if done:
-        save_user_settings(windowed_shortcuts=True)
-
-
-def _ensure_settings_shortcut() -> None:
-    """Once per installed PC: a desktop icon that opens the settings window
-    (language, voice, token) - `Parca.cmd --settings`. Installs made before
-    v0.1.6 never had it; recorded in settings.json so a tester who deletes
-    it doesn't get it back. Best-effort and silent."""
-    from client.config import _read_user_settings, save_user_settings
-    from client.updater import INSTALL_MARKER, REPO_ROOT
-
-    if not INSTALL_MARKER.exists() or _read_user_settings().get("settings_shortcut"):
-        return
-    script = (
-        "$d = [Environment]::GetFolderPath('Desktop'); $p = Join-Path $d $env:PARCA_LNK; "
-        "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($p); "
-        "$s.TargetPath = (Join-Path $env:PARCA_HOME 'Parca.cmd'); $s.Arguments = '--settings'; "
-        "$s.WorkingDirectory = $env:PARCA_HOME; $s.Save()"
-    )
-    try:
-        done = subprocess.run(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
-            env=dict(os.environ, PARCA_LNK=SETTINGS_SHORTCUT_NAME, PARCA_HOME=str(REPO_ROOT)),
-            capture_output=True, timeout=20,
-        ).returncode == 0
-    except Exception:  # noqa: BLE001
-        done = False
-    if done:
-        save_user_settings(settings_shortcut=True)
+        save_user_settings(shortcuts_v3=True)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -920,8 +899,7 @@ def main(argv: list[str] | None = None) -> int:
         print(texts.spoken("already_running"))
         play_line("already_running", _voice, fallback_tone=False)
         return 1
-    _ensure_settings_shortcut()
-    _ensure_windowed_shortcuts()
+    _tidy_shortcuts()
     try:
         return cmd_ask(args)
     except KeyboardInterrupt:

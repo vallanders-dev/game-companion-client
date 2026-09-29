@@ -325,7 +325,12 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--reason", choices=REASONS, default="missing")
     args = ap.parse_args(argv)
+    from client.gui.orb import claim_taskbar_identity, sphere_image
+    from PySide6.QtGui import QIcon, QPixmap
+
+    claim_taskbar_identity()
     app = QApplication.instance() or QApplication(sys.argv[:1])  # noqa: F841 - must exist before widgets
+    app.setWindowIcon(QIcon(QPixmap.fromImage(sphere_image(256))))
     ensure_fonts_loaded()
     dialog = TokenDialog(load_client_settings().server_url, args.reason)
     dialog.show()

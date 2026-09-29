@@ -51,7 +51,7 @@ from PySide6.QtWidgets import (
 
 from client.gui.fonts import BODY_FAMILY, HEADING_FAMILY, ensure_fonts_loaded
 from client.gui.main_window import CHIP_TEXT, TEXT, TEXT_2, MainWindow, line_icon
-from client.gui.orb import sphere_image
+from client.gui.orb import claim_taskbar_identity, sphere_image
 from client.gui.overlay import DARK_THEME, HudState, OverlayWindow
 from client.gui.ui_texts import ui
 
@@ -345,6 +345,7 @@ class Ui:
             _send(str(msg.get("cmd", "")))
 
     def _notice(self, kind: str) -> None:
+        print(f"[ui-process] aviso mostrado: {kind}", flush=True)
         L, keys = self.window.lang, self.window.keys
         if kind == "admin":
             self.notice.pop(ui(L, "admin_title"), ui(L, "admin_body", ask=keys["ask"], note=keys["note"]),
@@ -363,6 +364,7 @@ def main() -> None:
     _COMMAND_OUT = sys.stdout
     sys.stdout = sys.stderr
 
+    claim_taskbar_identity()
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)  # hiding the window to the tray must not end the UI
     ensure_fonts_loaded()
