@@ -55,7 +55,7 @@ if exist "%PARCA_HOME%\.venv\Scripts\python.exe" goto :have_venv
 
 echo  [4/4] Criando o atalho na area de trabalho...
 if defined PARCA_NO_SHORTCUT goto :shortcut_done
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$d = [Environment]::GetFolderPath('Desktop'); $s = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $d ('Par' + [char]0x00E7 + 'a.lnk'))); $s.TargetPath = (Join-Path $env:PARCA_HOME 'Parca.cmd'); $s.WorkingDirectory = $env:PARCA_HOME; $s.Save()" || echo  Nao consegui criar o atalho. Abra o Parca pelo arquivo %PARCA_HOME%\Parca.cmd
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$d = [Environment]::GetFolderPath('Desktop'); $s = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $d ('Par' + [char]0x00E7 + 'a.lnk'))); $s.TargetPath = (Join-Path $env:PARCA_HOME '.venv\Scripts\pythonw.exe'); $s.Arguments = '-m client.main'; $s.WorkingDirectory = $env:PARCA_HOME; $s.IconLocation = (Join-Path $env:PARCA_HOME 'clientssets\parca.ico'); $s.Save()" || echo  Nao consegui criar o atalho. Abra o Parca pelo arquivo %PARCA_HOME%\Parca.cmd
 :shortcut_done
 
 echo.
@@ -63,7 +63,7 @@ echo  Pronto! O Parca foi instalado.
 echo  Da proxima vez, abra pelo icone "Parca" na area de trabalho.
 if defined PARCA_NO_LAUNCH goto :end
 echo  Abrindo o Parca agora...
-start "" "%PARCA_HOME%\Parca.cmd"
+start "" /D "%PARCA_HOME%" "%PARCA_HOME%\.venv\Scripts\pythonw.exe" -m client.main
 :end
 if not defined PARCA_NO_PAUSE pause
 exit /b 0

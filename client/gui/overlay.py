@@ -80,18 +80,18 @@ the display in true exclusive mode would still hide any window.
 from __future__ import annotations
 
 import ctypes
-import math
 import re
 import sys
 
 from enum import Enum
 
-from PySide6.QtCore import QEasingCurve, QPointF, QPropertyAnimation, QRect, QRectF, QTimer, Qt
-from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath, QPen, QRadialGradient
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QRect, QRectF, QTimer, Qt
+from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QApplication, QWidget
 
 from client.gui.global_keys import AsyncKeyPoller
-from client.gui.theme import DARK_THEME, LIGHT_THEME, Theme
+from client.gui.orb import breathing_scale, draw_sphere, state_color
+from client.gui.theme import DARK_THEME, Theme
 
 
 class HudState(Enum):
@@ -99,6 +99,8 @@ class HudState(Enum):
     LISTENING = "ouvindo"
     THINKING = "pensando"
     SPEAKING = "falando"
+    SEARCHING = "pesquisando"
+    PAUSED = "pausado"
 
 
 # --------------------------------------------------------------------- #
@@ -146,13 +148,12 @@ HOTKEY_POLL_MS = 50
 # top. Cannot help against true exclusive-display fullscreen.
 TOPMOST_REASSERT_MS = 1000
 
-# Reactive orb (2026-09-25): breathing at idle, pulsing waveform while
-# listening/speaking, rotating swirl + orbiting dots while thinking - see
-# draw_reactive_orb() below. ~30fps; decorative/canned motion for now, NOT
-# driven by real mic amplitude yet (a later stage - see CLAUDE.md).
+# The orb is the approved mockup's sphere since 2026-09-29 (client/gui/orb.py,
+# shared with the main window): it breathes at rest and pulses while
+# listening/thinking/speaking. ~30fps; canned motion, not mic amplitude.
+# (It was a glow with waveform bars / orbiting dots from 2026-09-25.)
 ORB_ANIM_MS = 33
-ORB_GLOW_RADIUS_FACTOR = 1.9   # outer soft glow vs. the core's radius
-ORB_BAR_COUNT = 5
+ORB_SPHERE_RADIUS = 32  # the mockup's 64 px in-game orb, centred in ORB_OUTER_DIAMETER
 
 # --------------------------------------------------------------------- #
 # Presence opacity (Wispr-style idle fade).
@@ -216,108 +217,8 @@ def _parse_color(value: str) -> QColor:
     return color
 
 
-def draw_bars(painter: QPainter, rect: QRectF, heights: tuple[float, ...], color: QColor) -> None:
-    """N vertical rounded bars - the reactive orb's listening/speaking
-    waveform (draw_reactive_orb(), below). `heights` are 0.0-1.0 fractions,
-    driven by _orb_bar_heights()'s canned animation for now (not real mic
-    amplitude yet).
-    """
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(color)
-    gap_ratio = 0.35
-    n = len(heights)
-    bar_w = rect.width() / (n + (n - 1) * gap_ratio)
-    gap = bar_w * gap_ratio
-    corner = max(1.0, bar_w * 0.4)
-    x = rect.left()
-    for h in heights:
-        bar_h = rect.height() * max(0.0, min(1.0, h))
-        y = rect.bottom() - bar_h
-        painter.drawRoundedRect(QRectF(x, y, bar_w, bar_h), corner, corner)
-        x += bar_w + gap
-
-
-# --------------------------------------------------------------------- #
-# The reactive orb (2026-09-25) - a gradient glow + core, with per-state
-# motion: breathing at idle, a pulsing waveform while listening/speaking,
-# a rotating swirl of orbiting dots while thinking. No stroke/border by
-# design - definition comes from the glow's own falloff. Module-level
-# (not a method) so it stays a single, small, independently testable
-# drawing routine.
-# --------------------------------------------------------------------- #
-_ORB_PULSE_SPEED = {
-    HudState.IDLE: 0.22, HudState.LISTENING: 0.55, HudState.THINKING: 0.32, HudState.SPEAKING: 0.6,
-}
-_ORB_PULSE_AMOUNT = {
-    HudState.IDLE: 0.045, HudState.LISTENING: 0.09, HudState.THINKING: 0.05, HudState.SPEAKING: 0.09,
-}
-
-
-def _state_qcolor(theme: Theme, state: HudState) -> QColor:
-    s = theme.states
-    return QColor({
-        HudState.IDLE: s.idle, HudState.LISTENING: s.listening,
-        HudState.THINKING: s.thinking, HudState.SPEAKING: s.speaking,
-    }[state])
-
-
-def _orb_bar_heights(state: HudState, phase: float) -> tuple[float, ...]:
-    speed = 6.0 if state is HudState.SPEAKING else 5.0
-    return tuple(
-        0.35 + 0.65 * abs(math.sin(phase * speed + i * 1.3))
-        for i in range(ORB_BAR_COUNT)
-    )
-
-
-def _draw_thinking_motion(
-    painter: QPainter, cx: float, cy: float, radius: float, color: QColor, phase: float
-) -> None:
-    painter.setPen(Qt.PenStyle.NoPen)
-    for i in range(3):
-        direction = 1.0 if i % 2 == 0 else -1.0
-        angle = phase * direction * 1.1 * 2 * math.pi + i * (2 * math.pi / 3)
-        r = radius * 1.15
-        dot = QColor(color)
-        dot.setAlphaF(0.9)
-        painter.setBrush(dot)
-        painter.drawEllipse(QPointF(cx + r * math.cos(angle), cy + r * math.sin(angle)), 3.0, 3.0)
-
-
-def draw_reactive_orb(painter: QPainter, rect: QRectF, state: HudState, theme: Theme, phase: float) -> None:
-    color = _state_qcolor(theme, state)
-    cx, cy = rect.center().x(), rect.center().y()
-    radius = min(rect.width(), rect.height()) / 2
-
-    scale = 1.0 + _ORB_PULSE_AMOUNT[state] * math.sin(phase * _ORB_PULSE_SPEED[state] * 2 * math.pi)
-    core_radius = radius * scale
-
-    painter.setPen(Qt.PenStyle.NoPen)
-
-    glow = QRadialGradient(cx, cy, radius * ORB_GLOW_RADIUS_FACTOR)
-    glow_color = QColor(color)
-    glow_color.setAlphaF(0.5)
-    glow_transparent = QColor(color)
-    glow_transparent.setAlphaF(0.0)
-    glow.setColorAt(0.0, glow_color)
-    glow.setColorAt(1.0, glow_transparent)
-    painter.setBrush(glow)
-    painter.drawEllipse(QPointF(cx, cy), radius * ORB_GLOW_RADIUS_FACTOR, radius * ORB_GLOW_RADIUS_FACTOR)
-
-    core = QRadialGradient(cx - core_radius * 0.3, cy - core_radius * 0.35, core_radius * 1.7)
-    core.setColorAt(0.0, QColor(255, 255, 255, 60))
-    mid = QColor(color)
-    mid.setAlphaF(0.55)
-    core.setColorAt(0.45, mid)
-    core.setColorAt(1.0, _parse_color(theme.orb_core_fill))
-    painter.setBrush(core)
-    painter.drawEllipse(QPointF(cx, cy), core_radius, core_radius)
-
-    if state is HudState.THINKING:
-        _draw_thinking_motion(painter, cx, cy, core_radius, color, phase)
-    elif state in (HudState.LISTENING, HudState.SPEAKING):
-        bar_rect = QRectF(cx - core_radius * 0.75, cy - core_radius * 0.3, core_radius * 1.5, core_radius * 0.65)
-        bar_color = QColor(255, 255, 255, 215)
-        draw_bars(painter, bar_rect, _orb_bar_heights(state, phase), bar_color)
+def _hud_key(state: "HudState") -> str:
+    return state.value
 
 
 class OverlayWindow(QWidget):
@@ -434,13 +335,6 @@ class OverlayWindow(QWidget):
         remaining = max(0, cap - calls_made)
         self._usage_text = f"{remaining} restantes hoje"
         self.update()
-
-    def set_theme(self, theme: Theme) -> None:
-        self.theme = theme
-        self.update()
-
-    def toggle_theme(self) -> None:
-        self.set_theme(LIGHT_THEME if self.theme is DARK_THEME else DARK_THEME)
 
     def set_click_through(self, enabled: bool) -> None:
         self._click_through = enabled
@@ -599,7 +493,9 @@ class OverlayWindow(QWidget):
         orb_footprint = ORB_OUTER_DIAMETER + 2 * m
         orb_left = (self.width() - orb_footprint) / 2  # window is wider than the orb, to fit the usage pill's text
         outer = QRectF(orb_left + m, m, ORB_OUTER_DIAMETER, ORB_OUTER_DIAMETER)
-        draw_reactive_orb(painter, outer, self.state, self.theme, self._anim_phase)
+        key = _hud_key(self.state)
+        draw_sphere(painter, outer.center(), ORB_SPHERE_RADIUS * breathing_scale(key, self._anim_phase),
+                    state_color(key), glow=1.0)
 
         if self._click_through:
             # Click-through cue: a thin dashed ring shown ONLY while active -
@@ -634,15 +530,12 @@ class OverlayWindow(QWidget):
         painter.drawText(pill, Qt.AlignmentFlag.AlignCenter, self._usage_text)
 
     # ------------------------------------------------------------------ #
-    # Mouse: left-drag to move, right-click to toggle theme. No other
-    # click behavior (2026-09-25) - there is nothing left to open.
+    # Mouse: left-drag to move. Nothing else (2026-09-29: right-click used
+    # to switch to a light theme - removed, the dark look is the only one).
     # ------------------------------------------------------------------ #
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            event.accept()
-        elif event.button() == Qt.MouseButton.RightButton:
-            self.toggle_theme()
             event.accept()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802

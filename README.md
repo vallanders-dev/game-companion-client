@@ -23,7 +23,12 @@ O token fica salvo no seu usuário do Windows. É só seu: não compartilhe.
 
 ## Como usar
 
-Abra pelo ícone **Parça** na área de trabalho e jogue normalmente.
+Abra pelo ícone **Parça** na área de trabalho. Aparece a janela do Parça
+(status, jogo detectado, perguntas restantes do dia). Pode fechar ou
+minimizar: ele continua rodando na **bandeja do Windows**, perto do relógio.
+Clique no ícone da bandeja para abrir a janela de novo, **pausar** o Parça
+(F8/F6 param de funcionar até você retomar) ou **sair**. Durante o jogo fica
+só uma bolinha no canto da tela, que muda de cor quando ele ouve, pensa e fala.
 
 - **F8**: pergunta por voz (captura a tela e grava a pergunta)
 - **F6**: anota algo pra ele lembrar depois (ele confirma por voz)
@@ -42,6 +47,11 @@ Dicas importantes:
 - Se a internet cair ou o servidor reiniciar, é só perguntar de novo: o
   Parça se reconecta sozinho.
 - Deixe só **um** Parça aberto. Se abrir outro, ele avisa e fecha sozinho.
+- Se o jogo roda como administrador, o Parça mostra um aviso com o botão
+  **Reabrir como admin**: é só clicar e aceitar a pergunta do Windows.
+- Algo estranho? O registro do que aconteceu fica em
+  `%LOCALAPPDATA%\Parcapp\output\parca.log`: mande esse arquivo pra quem
+  organiza o beta.
 
 ## Idioma e voz
 
@@ -83,3 +93,5 @@ window that opens, pick **English** as the language, choose a voice
 - If your game runs as administrator, right-click the **Parça** icon and
   choose **Run as administrator**
 - Change language or voice any time with the **Parça - Configurações** icon
+- Closing the Parça window keeps it running in the Windows tray (near the
+  clock): click the tray icon to reopen it, pause it or quit

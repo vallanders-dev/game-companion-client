@@ -35,6 +35,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "interrupted_ask": "  (interrompido — nova pergunta)",
         "game_prompt": "Jogo: ",
         "bye": "Até a próxima!",
+        "paused": "Parça pausado: F8/F6 não fazem nada até você retomar pela bandeja.",
+        "resumed": "Parça de volta: F8/F6 funcionando.",
         "capturing": "  Capturando a tela...",
         "capture_failed": "  (não consegui capturar a tela — seguindo sem ela)",
         "speak_question": "  Fale a sua pergunta (para sozinho após {hang:.1f}s de silêncio)...",
@@ -81,6 +83,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "interrupted_ask": "  (interrupted — new question)",
         "game_prompt": "Game: ",
         "bye": "See you next time!",
+        "paused": "Parça paused: F8/F6 do nothing until you resume it from the tray.",
+        "resumed": "Parça is back: F8/F6 working.",
         "capturing": "  Capturing the screen...",
         "capture_failed": "  (couldn't capture the screen — going on without it)",
         "speak_question": "  Ask your question (stops by itself after {hang:.1f}s of silence)...",
@@ -116,7 +120,7 @@ def language() -> str:
     return _current
 
 
-def t(key: str, **kw) -> str:
+def t(key: str, /, **kw) -> str:  # positional-only: templates use {key} too (hotkey_ask)
     template = MESSAGES[_current].get(key) or MESSAGES["pt"].get(key, key)
     return template.format(**kw) if kw else template
 

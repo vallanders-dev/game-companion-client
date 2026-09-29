@@ -45,6 +45,9 @@ class ServerSession:
         self.token = token
         self.voice = voice
         self.display_name = ""
+        # Today's usage as of the handshake (servers from 2026-09-29 on);
+        # None when the server doesn't send it.
+        self.usage: tuple[int, int] | None = None
         self._ws = None
 
     # -- lifecycle ------------------------------------------------------------
@@ -72,6 +75,8 @@ class ServerSession:
             self.close()
             raise ServerError(f"handshake inesperado do servidor: {msg}")
         self.display_name = str(msg.get("display_name", ""))
+        if "usage_count" in msg and "daily_cap" in msg:
+            self.usage = (int(msg["usage_count"]), int(msg["daily_cap"]))
         return self.display_name
 
     def close(self) -> None:

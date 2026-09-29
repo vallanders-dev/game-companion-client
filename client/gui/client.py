@@ -1,7 +1,9 @@
-"""client/gui/client.py — main.py's side of the overlay. No Qt imports.
+"""client/gui/client.py — main.py's side of the desktop UI. No Qt imports.
 
-The overlay runs as its OWN process (client/gui/overlay_process.py), fed JSON
-lines on stdin, rather than as a Qt event loop inside main.py: main.py's
+The UI (in-game orb, main window, tray, notices - 2026-09-29) runs as its OWN
+process (client/gui/ui_process.py), fed JSON lines on stdin and answering
+with command lines on stdout (quit, pause, settings, ...), rather than as a
+Qt event loop inside main.py: main.py's
 streamed turn is timing-sensitive (AudioOut's 100 ms sliced writes, the
 2026-09-15 teardown segfault), a second event loop competing for the GIL
 there is a risk with no upside, and a crash in the overlay must never take
@@ -27,10 +29,14 @@ ROOT = Path(__file__).resolve().parents[2]  # client/gui/client.py -> repo root
 
 
 class HudClient:
-    def __init__(self, enabled: bool, log_path: Path | None = None) -> None:
+    def __init__(self, enabled: bool, log_path: Path | None = None, on_command=None) -> None:
+        """`on_command(name)` is called, on a reader thread, for each command
+        the UI sends back ("quit", "pause", "resume", "settings",
+        "relaunch_admin")."""
         self.enabled = False
         self.error: str | None = None
         self._queue: queue.Queue = queue.Queue()
+        self._on_command = on_command
         if not enabled:
             return
         try:
@@ -41,14 +47,27 @@ class HudClient:
                 log = subprocess.DEVNULL
             flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0  # Ctrl+C stays main.py's
             self._proc = subprocess.Popen(
-                [sys.executable, "-m", "client.gui.overlay_process"],
-                cwd=ROOT, stdin=subprocess.PIPE, stdout=log, stderr=log, creationflags=flags,
+                [sys.executable, "-m", "client.gui.ui_process"],
+                cwd=ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log, creationflags=flags,
             )
         except OSError as exc:
             self.error = str(exc)
             return
         self.enabled = True
         threading.Thread(target=self._writer, name="hud-writer", daemon=True).start()
+        threading.Thread(target=self._reader, name="hud-reader", daemon=True).start()
+
+    def _reader(self) -> None:
+        for raw in self._proc.stdout:
+            try:
+                cmd = json.loads(raw.decode("utf-8")).get("cmd")
+            except (ValueError, AttributeError):
+                continue
+            if cmd and self._on_command is not None:
+                try:
+                    self._on_command(str(cmd))
+                except Exception:  # noqa: BLE001 - a bad handler never kills the reader
+                    pass
 
     def _writer(self) -> None:
         while True:
@@ -73,7 +92,7 @@ class HudClient:
         no close(), a caller that creates more than one HudClient in the
         same process (main.py's cmd_ask() reassigns the module-level `_HUD`
         every call, and eval/game_detect_harness.py's PART 3 calls
-        cmd_ask() once per scenario) leaves every EARLIER overlay_process
+        cmd_ask() once per scenario) leaves every EARLIER UI process
         subprocess running forever - Python garbage-collecting a Popen
         object does not terminate its child. Confirmed directly on this
         machine: repeated test runs left FOUR orphaned `gui.demo` processes
@@ -104,7 +123,7 @@ class HudClient:
 
         Carries a wall-clock send timestamp (2026-09-25, diagnostic only -
         a player reported the overlay visibly lagging behind the audio) so
-        gui/overlay_process.py can log total pipe latency (queue -> writer
+        the UI process can log total pipe latency (queue -> writer
         thread -> subprocess stdin -> Qt signal -> set_state()) in
         output/overlay.log. Same machine, same clock - time.time() deltas
         are reliable at the tens-of-ms scale this measures."""
@@ -125,3 +144,21 @@ class HudClient:
 
     def usage(self, count: int, cap: int) -> None:
         self._send({"type": "usage", "count": count, "cap": cap})
+
+    def connection(self, state: str) -> None:
+        """"connecting" | "ok" | "offline"."""
+        self._send({"type": "conn", "state": state})
+
+    def info(self, lang: str, voice: str, keys: dict) -> None:
+        """UI language, the voice's label and the hotkeys ({"ask", "note", "pad"})."""
+        self._send({"type": "info", "lang": lang, "voice": voice, "keys": keys})
+
+    def paused(self, on: bool) -> None:
+        self._send({"type": "paused", "on": on})
+
+    def notice(self, kind: str) -> None:
+        """A pop-up above the tray: "admin" (with a relaunch button) or "offline"."""
+        self._send({"type": "notice", "kind": kind})
+
+    def show(self) -> None:
+        self._send({"type": "show"})

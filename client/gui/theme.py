@@ -63,28 +63,12 @@ DARK_THEME = Theme(
     inner_highlight="rgba(255, 255, 255, 0.06)",
     corner_radius=16,
     states=StateColors(
-        idle="#6B7280",
+        idle="#8A919E",  # the mockup's "Pronto" grey (was #6B7280)
         listening="#34D399",
         thinking="#F5B740",
         speaking="#FF6B4A",
     ),
 )
 
-LIGHT_THEME = Theme(
-    name="light",
-    text_primary="#1C1D21",
-    text_secondary="#54565F",
-    text_muted="#8A8D99",
-    accent="#FF6B4A",
-    surface_fill="rgba(255, 255, 255, 0.80)",
-    orb_core_fill="rgba(255, 255, 255, 0.62)",
-    divider="rgba(0, 0, 0, 0.06)",
-    inner_highlight="rgba(255, 255, 255, 0.50)",
-    corner_radius=16,
-    states=StateColors(
-        idle="#9AA0A6",
-        listening="#22A159",
-        thinking="#C97F0F",
-        speaking="#E85A3B",
-    ),
-)
+# LIGHT_THEME was removed 2026-09-29: the approved desktop design is dark
+# only, and the overlay's right-click switch to it is gone.

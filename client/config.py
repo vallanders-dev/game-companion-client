@@ -61,8 +61,9 @@ DEFAULT_BARGE_IN = True
 # same starting point and default as the original app's FILLER_DELAY_MS.
 DEFAULT_FILLER_DELAY_MS = 500.0
 DEFAULT_FILLER_ENABLED = True
-DEFAULT_OVERLAY_ENABLED = False  # off by default for this first real client cut - see client/main.py's docstring
-DEFAULT_TRAY_ENABLED = False     # ditto
+# The whole desktop UI (main window, tray, in-game orb - client/gui/ui_process.py).
+# On since stage 1 of the desktop UI (2026-09-29); OVERLAY=false = console only.
+DEFAULT_OVERLAY_ENABLED = True
 DEFAULT_VERBOSE_TELEMETRY = True
 DEFAULT_GAME_DETECT_POLL_SECONDS = 1.0
 DEFAULT_GAME_VOICE_MATCH_MIN_RATIO = 0.72
@@ -88,7 +89,6 @@ class ClientSettings:
     filler_delay_ms: float
     filler_enabled: bool
     overlay_enabled: bool
-    tray_enabled: bool
     verbose_telemetry: bool
     game_detect_poll_seconds: float
     game_voice_match_min_ratio: float
@@ -215,7 +215,6 @@ def load_client_settings() -> ClientSettings:
         filler_delay_ms=_float_env("FILLER_DELAY_MS", DEFAULT_FILLER_DELAY_MS),
         filler_enabled=_bool_env("FILLER_ENABLED", DEFAULT_FILLER_ENABLED),
         overlay_enabled=_bool_env("OVERLAY", DEFAULT_OVERLAY_ENABLED),
-        tray_enabled=_bool_env("TRAY", DEFAULT_TRAY_ENABLED),
         verbose_telemetry=_bool_env("VERBOSE_TELEMETRY", DEFAULT_VERBOSE_TELEMETRY),
         game_detect_poll_seconds=max(0.1, _float_env(
             "GAME_DETECT_POLL_SECONDS", DEFAULT_GAME_DETECT_POLL_SECONDS

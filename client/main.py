@@ -28,6 +28,13 @@ version unions in the server's per-tester game list too). `main()` runs
 `client/updater.py`'s startup update check first (a no-op outside a clone
 of the public client repo).
 
+**Desktop UI (stage 1, 2026-09-29):** the in-game orb, a main window, a tray
+icon with Pausar/Configurações/Sair and notices now run in the UI process
+(client/gui/ui_process.py, driven through `_UI`, a HudClient) and are ON by
+default. An installed copy starts with no console at all (the desktop icon
+runs pythonw.exe; console output goes to output/parca.log), so nothing here
+may depend on typed input: `_prompt()` returns "" without a console.
+
 Run with ``python -m client.main`` from the repo root, against a running
 ``python -m server.main serve``. Needs ``client/.env`` with ``SERVER_URL``
 and ``SERVER_AUTH_TOKEN`` (see ``client/.env.example`` and
@@ -61,6 +68,7 @@ from client.fixed_audio import (
 from client.fixed_lines import CLOSING_LINE, NO_NOTES_BAKED_HOTKEY, NO_NOTES_LINE, WEB_SEARCH_STILL_AFTER
 from client.texts import t
 from client.gamepad import GamepadWatcher, describe_combo
+from client.gui.client import ROOT, HudClient
 from client.listen import play_confirm_tone, play_stop_tone, preload_vad_model, record_until_silence
 from client.net import AuthError, ServerError, ServerSession
 from client.speech import AudioOut
@@ -71,6 +79,12 @@ _VERBOSE = True
 # its language - the console text and what the server speaks and hears.
 # Set in cmd_ask(), re-read between turns so the settings window applies live.
 _voice = voices.DEFAULT_VOICE
+# The desktop UI (orb, main window, tray). A disabled HudClient until
+# cmd_ask() starts the real one - every method is a safe no-op either way.
+_UI = HudClient(False)
+# Set from the tray's "Pausar o Parça": triggers are ignored until resumed.
+_PAUSED = threading.Event()
+_SESSION: "ServerSession | None" = None
 
 
 def _set_voice(key: str) -> None:
@@ -88,10 +102,19 @@ def _fmt(hotkey: str) -> str:
     return hotkey.upper()
 
 
+def _has_console() -> bool:
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
 def _prompt(label: str) -> str:
+    if not _has_console():  # pythonw launch: nobody can type an answer
+        return ""
     try:
         return input(label).strip()
-    except EOFError:
+    except (EOFError, RuntimeError):
         return ""
 
 
@@ -121,6 +144,9 @@ def _wait_for_game_or_trigger(settings, triggers) -> tuple[str | None, object | 
         if detected:
             return detected, None
         fired = next((t for t in triggers if t.pressed()), None)
+        if fired is not None and _PAUSED.is_set():
+            fired.clear()
+            fired = None
         if fired is not None:
             return None, fired
         time.sleep(settings.game_detect_poll_seconds)
@@ -131,8 +157,10 @@ def _announce_game(settings, name: str) -> None:
     game runs as administrator and this client doesn't (keys would be
     invisible to it - see capture.foreground_game_needs_admin())."""
     print(t("game_detected", name=name))
+    _UI.game(name)
     if foreground_game_needs_admin(settings.game_aliases_path):
         print(t("attention", text=texts.spoken("game_needs_admin")))
+        _UI.notice("admin")  # with a one-click "Reabrir como admin"
         play_line("game_needs_admin", _voice, fallback_tone=False)
 
 
@@ -151,7 +179,9 @@ def resolve_active_game_by_voice(settings, session: ServerSession) -> tuple[str 
         # Spoken, not just printed: the player is looking at the game, not
         # the console. The first client cut only printed this - a real gap.
         play_line(line, _voice, fallback_tone=False)
+        _UI.state("ouvindo")
         wav = _record(settings)
+        _UI.state("idle")
         if not wav:
             continue
         try:
@@ -264,8 +294,11 @@ def _remember_note(session: ServerSession, settings, game: str, barge: "BargeInW
         telemetry(f"  (captura falhou: {exc})")
 
     print(t("speak_note", hang=settings.mic_silence_hang))
+    _UI.state("ouvindo")
     wav = _record(settings)
+    _UI.state("pensando")
     if not wav:
+        _UI.state("idle")
         print(t("note_not_heard_retry"))
         play_stop_tone()
         return
@@ -280,21 +313,29 @@ def _remember_note(session: ServerSession, settings, game: str, barge: "BargeInW
 
     def record_reply() -> bytes | None:
         print(t("answer_yes_no"))
-        return _record(settings)
+        _UI.state("ouvindo")
+        reply = _record(settings)
+        _UI.state("pensando")
+        return reply
 
     def on_audio(pcm: bytes, _turn_seq: int) -> None:
+        _UI.state("falando")
         audio_out.write(pcm, cancel)
 
     try:
         result = session.remember(
             turn_id, game, wav, screenshot_bytes=screenshot, record_reply=record_reply,
-            cancel=cancel, on_audio=on_audio,
+            cancel=cancel, on_audio=on_audio, on_usage=_UI.usage,
         )
     except ServerError as exc:
         print(t("error", error=exc))
+        _UI.state("idle")
+        _UI.connection("offline")
         audio_out.close()
         return
     audio_out.close(drain=True)
+    _UI.state("idle")
+    _UI.connection("ok")
 
     outcome = result.get("outcome")
     if outcome == "note_saved":
@@ -341,7 +382,9 @@ def cmd_ask(_args: argparse.Namespace) -> int:
         return 1
     settings = load_client_settings()  # the first-launch window also picks the voice
     _set_voice(settings.voice)
+    _start_ui(settings)
     print(t("connecting", url=settings.server_url))
+    offline_told = False
     while True:
         session = ServerSession(settings.server_url, settings.server_auth_token, voice=_voice)
         try:
@@ -356,10 +399,21 @@ def cmd_ask(_args: argparse.Namespace) -> int:
                 return 1
             settings = load_client_settings()
         except ServerError as exc:
+            # No console to read an error from any more: the window shows
+            # "Sem conexão, tentando de novo" and this keeps trying.
             print(t("error", error=exc).strip())
             print(t("server_down"))
-            return 1
+            _UI.connection("offline")
+            if not offline_told:
+                offline_told = True
+                _UI.notice("offline")
+            time.sleep(RECONNECT_SECONDS)
+    global _SESSION
+    _SESSION = session
     print(t("connected", name=display_name))
+    _UI.connection("ok")
+    if session.usage:
+        _UI.usage(*session.usage)
 
     preload_vad_model()
     manager = HotkeyManager(settings.capture_hotkey)
@@ -372,6 +426,9 @@ def cmd_ask(_args: argparse.Namespace) -> int:
     if gamepad.available:
         print(t("gamepad", combo=describe_combo(gamepad.combo)))
     print(t("tip"))
+    ui_keys = {"ask": _fmt(manager.hotkey), "note": _fmt(remember_manager.hotkey),
+               "pad": _short_combo(describe_combo(gamepad.combo)) if gamepad.available else None}
+    _send_ui_info(ui_keys)
 
     # All three triggers, as in the original app: F6 mid-answer interrupts
     # and goes straight to taking a note (pending_fired carries which one).
@@ -402,6 +459,7 @@ def cmd_ask(_args: argparse.Namespace) -> int:
             session.voice = _voice
             fillers = make_fillers()
             print(t("voice_changed", name=voices.get(_voice).name))
+            _send_ui_info(ui_keys)
 
         detected = detect_game(settings.game_aliases_path)
         if detected:
@@ -422,6 +480,7 @@ def cmd_ask(_args: argparse.Namespace) -> int:
                 if resolved:
                     active_game = resolved
                     game = resolved
+                    _UI.game(resolved)
                     print(t("game_by_voice_free" if is_freeform else "game_by_voice", name=resolved))
                 else:
                     print(f"  {texts.spoken('game_unresolved')}")
@@ -447,6 +506,8 @@ def cmd_ask(_args: argparse.Namespace) -> int:
         if fired is GAME_CHANGED:
             print("-" * 48)
             continue
+        if fired is not None and _PAUSED.is_set():
+            continue  # paused from the tray: the key does nothing
 
         if fired is None and scene.strip().lower() == "jogo":
             new_game = _prompt(t("game_prompt"))
@@ -474,7 +535,9 @@ def cmd_ask(_args: argparse.Namespace) -> int:
                 print(t("capture_failed"))
                 telemetry(f"  (captura falhou: {exc})")
             print(t("speak_question", hang=settings.mic_silence_hang))
+            _UI.state("ouvindo")
             wav = _record(settings)
+            _UI.state("pensando" if wav else "idle")
             if not wav:
                 print(t("no_voice_type"))
                 question_text = _prompt(t("question_prompt"))
@@ -504,6 +567,8 @@ def cmd_ask(_args: argparse.Namespace) -> int:
         def on_state(state: str) -> None:
             nonlocal filler_timer
             telemetry(f"  [{state}]")
+            if state in ("pensando", "pesquisando", "falando"):
+                _UI.state(state)
             # "pensando" arrives after server-side STT + vision, right before
             # retrieval/Kimi - the same point the original app armed its
             # filler (the Kimi call), so FILLER_DELAY_MS means the same thing.
@@ -538,10 +603,12 @@ def cmd_ask(_args: argparse.Namespace) -> int:
         try:
             result = session.ask(
                 turn_id, game, wav_bytes=wav, question_text=question_text, screenshot_bytes=screenshot,
-                cancel=cancel, on_state=on_state, on_meta=on_meta, on_audio=on_audio,
+                cancel=cancel, on_state=on_state, on_meta=on_meta, on_audio=on_audio, on_usage=_UI.usage,
             )
         except ServerError as exc:
             print(t("error", error=exc))
+            _UI.state("idle")
+            _UI.connection("offline")
             for timer in [filler_timer, *search_timers]:
                 if timer is not None:
                     timer.cancel()
@@ -575,6 +642,8 @@ def cmd_ask(_args: argparse.Namespace) -> int:
                 pending_fired = barge.fired if barge is not None else None
         if barge is not None:
             barge.disarm()
+        _UI.state("idle")
+        _UI.connection("ok")
 
         print(t("answer", text=result.get("answer_text", "")))
         outcome = result.get("outcome")
@@ -614,10 +683,106 @@ def cmd_ask(_args: argparse.Namespace) -> int:
         print("-" * 48)
 
 
+RECONNECT_SECONDS = 5.0
+
+
+def _short_combo(combo: str) -> str:
+    """"BACK + LEFTSHOULDER" -> "BACK+LB", for the window's key tile."""
+    for long, short in (("LEFTSHOULDER", "LB"), ("RIGHTSHOULDER", "RB"), ("LEFTTRIGGER", "LT"),
+                        ("RIGHTTRIGGER", "RT"), ("LEFTSTICK", "LS"), ("RIGHTSTICK", "RS")):
+        combo = combo.replace(long, short)
+    return combo.replace(" ", "")
+
+
+def _voice_ui_label() -> str:
+    v = voices.get(_voice)
+    return f"{v.name} · " + ("English" if v.language == "en" else "Português")
+
+
+def _send_ui_info(keys: dict) -> None:
+    _UI.info(voices.get(_voice).language, _voice_ui_label(), keys)
+
+
+def _start_ui(settings) -> None:
+    """Starts the desktop UI process (main window, tray, in-game orb). An
+    installed copy started from the old console launcher (Parca.cmd) also
+    hides that console once the window is up - the window replaces it."""
+    global _UI
+    _UI.close()
+    _UI = HudClient(settings.overlay_enabled, log_path=ROOT / "output" / "overlay.log",
+                    on_command=_on_ui_command)
+    _UI.connection("connecting")
+    from client.updater import INSTALL_MARKER
+
+    if _UI.enabled and INSTALL_MARKER.exists() and os.name == "nt":
+        try:
+            import ctypes
+
+            hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+            if hwnd:
+                ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE
+        except Exception:  # noqa: BLE001 - cosmetic
+            pass
+
+
+def _on_ui_command(cmd: str) -> None:
+    """A button in the UI process (tray menu, main window, notice). Runs on
+    HudClient's reader thread."""
+    if cmd == "quit":
+        print(t("bye"))
+        if _SESSION is not None:
+            _SESSION.close()
+        _UI.close()
+        os._exit(0)  # same abrupt exit Ctrl+C was; the voice loop has no gentler cancellation point
+    elif cmd in ("pause", "resume"):
+        if cmd == "pause":
+            _PAUSED.set()
+        else:
+            _PAUSED.clear()
+        _UI.paused(_PAUSED.is_set())
+        print(t("paused" if _PAUSED.is_set() else "resumed"))
+    elif cmd == "settings":
+        subprocess.Popen([sys.executable, "-m", "client.gui.token_dialog", "--reason", "settings"], cwd=ROOT)
+    elif cmd == "relaunch_admin":
+        _relaunch_as_admin()
+
+
+def _relaunch_as_admin() -> None:
+    """The admin notice's button: start an elevated copy (Windows asks for
+    permission) and step aside for it - it waits for this copy's
+    single-instance lock (see `--relaunched`)."""
+    if os.name != "nt":
+        return
+    import ctypes
+
+    exe = sys.executable
+    windowed = os.path.join(os.path.dirname(exe), "pythonw.exe")
+    if os.path.exists(windowed):
+        exe = windowed
+    ok = ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, "-m client.main --relaunched", str(ROOT), 1)
+    if ok > 32:  # <= 32 is an error, including the user saying no to the prompt
+        if _SESSION is not None:
+            _SESSION.close()
+        _UI.close()
+        os._exit(0)
+
+
 _INSTANCE_MUTEX = None  # held for the whole process lifetime
 
 
-def _claim_single_instance() -> bool:
+def _claim_single_instance(wait_seconds: float = 0.0) -> bool:
+    """See _claim_once(). `wait_seconds` > 0 (an elevated relaunch) keeps
+    trying while the copy that launched it exits."""
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        if _claim_once():
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.25)
+
+
+def _claim_once() -> bool:
     """False if another copy of the client is already running in this
     Windows session. Two copies both hook F8/F6 and answer every question
     twice, over each other, at double the cost - exactly what the first
@@ -637,12 +802,69 @@ def _claim_single_instance() -> bool:
     if not handle:
         return err != 5  # ERROR_ACCESS_DENIED
     if err == 183:  # ERROR_ALREADY_EXISTS
+        # The handle to the OTHER copy's mutex must be closed: an open handle
+        # keeps the named mutex alive, so a copy retrying for the lock (an
+        # elevated relaunch) would otherwise hold it forever itself.
+        k32.CloseHandle(ctypes.c_void_p(handle))
         return False
     _INSTANCE_MUTEX = handle
     return True
 
 
 SETTINGS_SHORTCUT_NAME = "Parça - Configurações.lnk"
+LAUNCH_SHORTCUT_NAME = "Parça.lnk"
+ICON_PATH = ROOT / "client" / "assets" / "parca.ico"
+
+
+def _log_without_console() -> None:
+    """Started by pythonw.exe (the desktop icon since 2026-09-29) there is
+    no console: print() would go nowhere and any direct write to stdout
+    would raise. Everything goes to output/parca.log instead (the previous
+    run's kept as parca.prev.log)."""
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    log = ROOT / "output" / "parca.log"
+    try:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        if log.exists():
+            log.replace(log.with_name("parca.prev.log"))
+        stream = open(log, "w", encoding="utf-8", buffering=1)
+    except OSError:
+        stream = open(os.devnull, "w", encoding="utf-8")
+    sys.stdout = sys.stdout or stream
+    sys.stderr = sys.stderr or stream
+
+
+def _ensure_windowed_shortcuts() -> None:
+    """Once per installed PC (2026-09-29): point the desktop icons at
+    pythonw.exe, so Parça opens as a window with no console behind it, and
+    give them the orb icon. Before, "Parça" ran Parca.cmd in a console.
+    Best-effort and silent; recorded in settings.json."""
+    from client.config import _read_user_settings, save_user_settings
+    from client.updater import INSTALL_MARKER, REPO_ROOT
+
+    pythonw = REPO_ROOT / ".venv" / "Scripts" / "pythonw.exe"
+    if (not INSTALL_MARKER.exists() or not pythonw.exists()
+            or _read_user_settings().get("windowed_shortcuts")):
+        return
+    script = (
+        "$d = [Environment]::GetFolderPath('Desktop'); $w = New-Object -ComObject WScript.Shell; "
+        "foreach ($pair in @(@($env:PARCA_LNK, '-m client.main'), @($env:PARCA_SET_LNK, '-m client.main --settings'))) { "
+        "$s = $w.CreateShortcut((Join-Path $d $pair[0])); $s.TargetPath = $env:PARCA_PYW; "
+        "$s.Arguments = $pair[1]; $s.WorkingDirectory = $env:PARCA_HOME; "
+        "if (Test-Path $env:PARCA_ICO) { $s.IconLocation = $env:PARCA_ICO }; $s.Save() }"
+    )
+    try:
+        done = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+            env=dict(os.environ, PARCA_LNK=LAUNCH_SHORTCUT_NAME, PARCA_SET_LNK=SETTINGS_SHORTCUT_NAME,
+                     PARCA_PYW=str(pythonw), PARCA_HOME=str(REPO_ROOT), PARCA_ICO=str(ICON_PATH)),
+            capture_output=True, timeout=20, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        ).returncode == 0
+    except Exception:  # noqa: BLE001
+        done = False
+    if done:
+        save_user_settings(windowed_shortcuts=True)
 
 
 def _ensure_settings_shortcut() -> None:
@@ -677,7 +899,9 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m client.main")
     ap.add_argument("--settings", action="store_true",
                     help="open the settings window (language, voice, token) and exit")
+    ap.add_argument("--relaunched", action="store_true", help=argparse.SUPPRESS)  # elevated restart
     args = ap.parse_args(argv)
+    _log_without_console()
     if args.settings:
         # Its own process, like at first launch; a running copy picks the new
         # voice up from its next turn. Always 0, so Parca.cmd doesn't pause.
@@ -691,12 +915,13 @@ def main(argv: list[str] | None = None) -> int:
         return subprocess.call([sys.executable, "-m", "client.main", *(argv or [])], env=env)
     # After the update step: a relaunching parent never gets here, so only
     # the copy that actually runs holds the lock.
-    if not _claim_single_instance():
+    if not _claim_single_instance(10.0 if args.relaunched else 0.0):
         _set_voice(load_saved_voice())
         print(texts.spoken("already_running"))
         play_line("already_running", _voice, fallback_tone=False)
         return 1
     _ensure_settings_shortcut()
+    _ensure_windowed_shortcuts()
     try:
         return cmd_ask(args)
     except KeyboardInterrupt:
