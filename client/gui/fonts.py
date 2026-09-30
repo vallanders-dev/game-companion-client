@@ -1,12 +1,14 @@
-"""gui/fonts.py — bundled Chakra Petch / Manrope, loaded via QFontDatabase.
+"""gui/fonts.py — bundled Chakra Petch / Noto Sans, loaded via QFontDatabase.
 
 Both are Google Fonts under the OFL (see gui/assets/fonts/*/OFL.txt).
-Chakra Petch ships static weight files upstream; Manrope ships only as a
-single variable font (`Manrope[wght].ttf`) in the same repo, so the
-400/500/600 static instances here were generated once with
-`fonttools varLib.instancer` (a build-time step, not a runtime
-dependency — fonttools is not in requirements.txt) and committed as
-plain static .ttf files like Chakra Petch's.
+Chakra Petch (headings) ships static weight files upstream. Noto Sans (body
+since 2026-09-29, chosen for being the closest free match to Discord's look -
+Discord's own font stack falls back to it; it replaced Manrope) ships only as
+a variable font (`NotoSans[wdth,wght].ttf`, google/fonts), so the 400/500/
+600/700 static instances here were generated once with `fonttools
+varLib.instancer` and subset to Latin (pt/en) plus common punctuation -
+~80 KB each instead of 2 MB - a build-time step, not a runtime dependency
+(fonttools is not in requirements.txt).
 
 If any file fails to load (missing, corrupt, wrong path), heading_font()
 and body_font() silently fall back to FALLBACK_FAMILY instead of leaving
@@ -26,13 +28,14 @@ _FONT_DIR = Path(__file__).parent / "assets" / "fonts"
 FONT_FILES = [
     _FONT_DIR / "ChakraPetch" / "ChakraPetch-SemiBold.ttf",
     _FONT_DIR / "ChakraPetch" / "ChakraPetch-Bold.ttf",
-    _FONT_DIR / "Manrope" / "Manrope-Regular.ttf",
-    _FONT_DIR / "Manrope" / "Manrope-Medium.ttf",
-    _FONT_DIR / "Manrope" / "Manrope-SemiBold.ttf",
+    _FONT_DIR / "NotoSans" / "NotoSans-Regular.ttf",
+    _FONT_DIR / "NotoSans" / "NotoSans-Medium.ttf",
+    _FONT_DIR / "NotoSans" / "NotoSans-SemiBold.ttf",
+    _FONT_DIR / "NotoSans" / "NotoSans-Bold.ttf",
 ]
 
 HEADING_FAMILY = "Chakra Petch"
-BODY_FAMILY = "Manrope"
+BODY_FAMILY = "Noto Sans"
 FALLBACK_FAMILY = "Segoe UI"
 
 _loaded = False
@@ -67,7 +70,7 @@ def heading_font(weight: QFont.Weight, size: float, tracking_percent: int | None
 
 
 def body_font(weight: QFont.Weight, size: float, italic: bool = False) -> QFont:
-    """Manrope (game name, question/answer captions)."""
+    """Noto Sans (body text, labels, buttons)."""
     family = BODY_FAMILY if _load_ok else FALLBACK_FAMILY
     font = QFont(family)
     font.setPointSizeF(size)
