@@ -7,17 +7,21 @@ Você precisa de um **token de testador**, fornecido por quem organiza o beta.
 
 ## Instalação (uma vez só)
 
-1. **Instale o Python:** baixe em [python.org/downloads](https://www.python.org/downloads/)
-   e, na primeira tela do instalador, **marque "Add python.exe to PATH"**.
-2. **Baixe o instalador do Parça:**
-   [instalar-parca.cmd](https://github.com/vallanders-dev/game-companion-client/releases/latest/download/instalar-parca.cmd)
-3. **Dê dois cliques nele.** Se o Windows mostrar "O Windows protegeu o
-   computador", clique em **Mais informações** e depois em **Executar assim
-   mesmo**. A instalação leva alguns minutos, coloca o **Parça** no menu
-   Iniciar e pergunta se você quer um ícone na área de trabalho.
+1. **Baixe o instalador:**
+   [Parca-Setup.exe](https://github.com/vallanders-dev/game-companion-client/releases/latest/download/Parca-Setup.exe)
+   (cerca de 70 MB). Não precisa instalar Python nem mais nada: vem tudo junto.
+2. **Abra o arquivo.** Como o Parça ainda é um programa novo, o Windows pode
+   mostrar "O Windows protegeu o computador": clique em **Mais informações**
+   e depois em **Executar assim mesmo**.
+3. Escolha se quer um **ícone na área de trabalho** e clique em **Instalar**.
+   Leva menos de um minuto e não pede senha de administrador. O **Parça**
+   aparece no menu Iniciar.
 4. O Parça abre sozinho no final. Na janela que aparecer, escolha o
    **idioma** e a **voz** (o botão **Ouvir** toca uma amostra), **cole o
    seu token** e clique em **Conectar**. Pronto!
+
+Já tinha instalado pelo `instalar-parca.cmd`? Rode o Parca-Setup.exe por cima:
+ele troca a instalação antiga pela nova e mantém o seu token.
 
 O token fica salvo no seu usuário do Windows. É só seu: não compartilhe.
 
@@ -50,7 +54,7 @@ Dicas importantes:
 - Se o jogo roda como administrador, o Parça mostra um aviso com o botão
   **Reabrir como admin**: é só clicar e aceitar a pergunta do Windows.
 - Algo estranho? O registro do que aconteceu fica em
-  `%LOCALAPPDATA%\Parcapp\output\parca.log`: mande esse arquivo pra quem
+  `%LOCALAPPDATA%\Parca\app\output\parca.log`: mande esse arquivo pra quem
   organiza o beta.
 
 ## Idioma e voz
@@ -64,6 +68,11 @@ no ícone da bandeja. A nova voz vale a partir da próxima pergunta.
 
 Toda vez que você abre o Parça ele verifica se há uma versão nova e se
 atualiza sozinho.
+
+## Desinstalar
+
+Configurações do Windows → **Aplicativos** → **Parça** → **Desinstalar**. O seu
+token fica guardado, caso você instale de novo.
 
 ## Trocar de token
 
@@ -82,9 +91,11 @@ e abra pelo `Parca.cmd`. As atualizações chegam do mesmo jeito.
 ## English
 
 Parça also speaks **English** (voices Lily, Ivanna and Hale): it understands
-you and answers in English. Install it the same way (steps above: Python with
-"Add python.exe to PATH" ticked, then the `instalar-parca.cmd` link). In the
-window that opens, pick **English** as the language, choose a voice
+you and answers in English. Download
+[Parca-Setup.exe](https://github.com/vallanders-dev/game-companion-client/releases/latest/download/Parca-Setup.exe)
+and open it - nothing else to install. If Windows says "Windows protected your
+PC", click **More info**, then **Run anyway**. In the window that opens, pick
+**English** as the language, choose a voice
 (**Listen** plays a sample), paste your tester token and click **Connect**.
 
 - **F8**: ask by voice · **F6**: save a note (it asks you to confirm) ·

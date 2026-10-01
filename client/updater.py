@@ -4,12 +4,13 @@ Runs once, at the top of `client.main.main()`. Never blocks launch: every
 failure (no network, no git, dirty tree, GitHub down) prints at most one line
 and the current version keeps running.
 
-  * An install made by `instalar-parca.cmd` (marked by INSTALL_MARKER, no
-    git needed): if the latest release is newer, download that release's
-    zip from GitHub, sync it over the program folder (the tester's own
-    files - .venv, client/output, client/.env*, client/config.json - are
-    never touched), reinstall requirements only if they changed, and tell
-    the caller to restart.
+  * An install made by Parca-Setup.exe or `instalar-parca.cmd` (marked by
+    INSTALL_MARKER, no git needed): if the latest release is newer, download
+    that release's zip from GitHub, sync it over the program folder (the
+    Python it runs on - runtime/ from the setup, .venv from the .cmd - and
+    the tester's own files - client/output, client/.env*, client/config.json
+    - are never touched), reinstall requirements only if they changed, and
+    tell the caller to restart.
   * A git clone of the PUBLIC repo (origin is PUBLIC_REPO): same, via
     `git pull --ff-only`.
   * A plain ZIP download: only a notice with the download URL.
@@ -40,8 +41,10 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = PACKAGE_DIR.parent
 VERSION_FILE = PACKAGE_DIR / "VERSION"
 INSTALL_MARKER = REPO_ROOT / ".parca-install"
-# Never overwritten or deleted by a zip update - the tester's own state.
-_PROTECTED = {".venv", ".parca-install", "output", "config.json", "__pycache__"}
+# Never overwritten or deleted by a zip update - the Python the program runs
+# on (runtime: Parca-Setup.exe's built-in one, with its uninstaller inside;
+# .venv: instalar-parca.cmd's) and the tester's own state.
+_PROTECTED = {"runtime", ".venv", ".parca-install", "output", "config.json", "__pycache__"}
 
 
 def local_version() -> str:
@@ -73,7 +76,7 @@ def _git(*args: str) -> subprocess.CompletedProcess:
 
 
 def _checkout_kind() -> str:
-    """'installed' (made by instalar-parca.cmd), 'public' (a clone of
+    """'installed' (Parca-Setup.exe or instalar-parca.cmd), 'public' (a clone of
     PUBLIC_REPO), 'other' (any other git checkout), or 'none' (not a git
     checkout, or git isn't installed)."""
     if INSTALL_MARKER.exists():
