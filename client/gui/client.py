@@ -156,9 +156,11 @@ class HudClient:
     def paused(self, on: bool) -> None:
         self._send({"type": "paused", "on": on})
 
-    def notice(self, kind: str) -> None:
-        """A pop-up above the tray: "admin" (with a relaunch button) or "offline"."""
-        self._send({"type": "notice", "kind": kind})
+    def notice(self, kind: str, **extra) -> None:
+        """A pop-up above the tray: "admin" (with a relaunch button),
+        "offline", "update" (version=..., with a restart button) or
+        "announce" (text=..., a message from the server)."""
+        self._send({"type": "notice", "kind": kind, **extra})
 
     def show(self) -> None:
         self._send({"type": "show"})

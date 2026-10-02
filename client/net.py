@@ -58,6 +58,7 @@ class ServerSession:
         # Today's usage as of the handshake (servers from 2026-09-29 on);
         # None when the server doesn't send it.
         self.usage: tuple[int, int] | None = None
+        self.announce: dict | None = None   # the server's current announcement, if any
         self._ws = None
 
     # -- lifecycle ------------------------------------------------------------
@@ -88,6 +89,8 @@ class ServerSession:
         self.display_name = str(msg.get("display_name", ""))
         if "usage_count" in msg and "daily_cap" in msg:
             self.usage = (int(msg["usage_count"]), int(msg["daily_cap"]))
+        announce = msg.get("announce")
+        self.announce = announce if isinstance(announce, dict) and announce.get("id") else None
         return self.display_name
 
     def close(self) -> None:

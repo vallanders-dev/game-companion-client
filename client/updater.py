@@ -184,6 +184,24 @@ def _reinstall_requirements_if_changed(before: str) -> None:
               "`pip install -r requirements.txt` manualmente se algo não funcionar)")
 
 
+def available_update() -> str | None:
+    """The newer version waiting, if any - checked without applying it, for
+    the "new version, restart?" notice while the app runs (client.main's
+    update watcher). Only where a restart really updates (an install or a
+    public clone); never raises."""
+    if os.environ.get("AUTO_UPDATE", "").strip().lower() in ("0", "false", "no", "off"):
+        return None
+    try:
+        if _checkout_kind() not in ("installed", "public"):
+            return None
+        release = _latest_release()
+    except Exception:  # noqa: BLE001 - offline: nothing to tell
+        return None
+    if release and _parse(release["version"]) > _parse(local_version()):
+        return release["version"]
+    return None
+
+
 def check_for_update() -> bool:
     """Returns True if the code on disk was just updated and the caller
     should restart itself; False in every other case."""

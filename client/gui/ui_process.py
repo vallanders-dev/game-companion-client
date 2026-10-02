@@ -26,7 +26,7 @@ stdin, JSON lines from the client:
   {"type": "conn", "state": "connecting|ok|offline"}
   {"type": "info", "lang": "pt|en", "voice": str, "keys": {"ask", "note", "pad"}}
   {"type": "paused", "on": bool}
-  {"type": "notice", "kind": "admin|offline"}
+  {"type": "notice", "kind": "admin|offline|update|announce", "version"?, "text"?}
   {"type": "show"}
 stdout, JSON lines back to the client (the ONLY thing written there - every
 diagnostic print goes to stderr, i.e. output/overlay.log):
@@ -336,7 +336,7 @@ class Ui:
             self._show_state()
             self._texts()
         elif kind == "notice":
-            self._notice(str(msg.get("kind", "")))
+            self._notice(str(msg.get("kind", "")), msg)
         elif kind == "show":
             self.window.show_and_raise()
         elif kind == "echo_cmd":
@@ -344,7 +344,7 @@ class Ui:
             # channel end to end without a mouse. The client never sends it.
             _send(str(msg.get("cmd", "")))
 
-    def _notice(self, kind: str) -> None:
+    def _notice(self, kind: str, msg: dict | None = None) -> None:
         print(f"[ui-process] aviso mostrado: {kind}", flush=True)
         L, keys = self.window.lang, self.window.keys
         if kind == "admin":
@@ -352,6 +352,11 @@ class Ui:
                             ui(L, "admin_yes"), ui(L, "admin_no"), on_yes=lambda: _send("relaunch_admin"))
         elif kind == "offline":
             self.notice.pop(ui(L, "offline_title"), ui(L, "offline_body"), None, None)
+        elif kind == "update":
+            self.notice.pop(ui(L, "update_title"), ui(L, "update_body", version=str((msg or {}).get("version", ""))),
+                            ui(L, "update_yes"), ui(L, "update_no"), on_yes=lambda: _send("restart_update"))
+        elif kind == "announce" and (msg or {}).get("text"):
+            self.notice.pop(ui(L, "announce_title"), str(msg["text"]), ui(L, "announce_ok"), None)
 
 
 def main() -> None:

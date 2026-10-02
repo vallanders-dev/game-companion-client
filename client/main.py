@@ -43,6 +43,7 @@ and ``SERVER_AUTH_TOKEN`` (see ``client/.env.example`` and
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -429,6 +430,8 @@ def cmd_ask(_args: argparse.Namespace) -> int:
     ui_keys = {"ask": _fmt(manager.hotkey), "note": _fmt(remember_manager.hotkey),
                "pad": _short_combo(describe_combo(gamepad.combo)) if gamepad.available else None}
     _send_ui_info(ui_keys)
+    _show_announcement(session.announce)
+    threading.Thread(target=_watch_for_updates, name="update-watch", daemon=True).start()
 
     # All three triggers, as in the original app: F6 mid-answer interrupts
     # and goes straight to taking a note (pending_fired carries which one).
@@ -745,6 +748,76 @@ def _on_ui_command(cmd: str) -> None:
         subprocess.Popen([sys.executable, "-m", "client.gui.token_dialog", "--reason", "settings"], cwd=ROOT)
     elif cmd == "relaunch_admin":
         _relaunch_as_admin()
+    elif cmd == "restart_update":
+        _restart_for_update()
+
+
+def _restart_for_update() -> None:
+    """The update notice's button: start a fresh copy, which applies the
+    update at startup (check_for_update) and then waits for this copy's
+    single-instance lock (`--relaunched`), and step aside for it."""
+    exe = sys.executable
+    windowed = os.path.join(os.path.dirname(exe), "pythonw.exe")
+    if os.name == "nt" and os.path.exists(windowed):
+        exe = windowed
+    flags = 0x00000008 | 0x00000200 if os.name == "nt" else 0  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    try:
+        subprocess.Popen([exe, "-m", "client.main", "--relaunched"], cwd=ROOT, creationflags=flags,
+                         close_fds=True)
+    except OSError as exc:
+        print(f"(não consegui reiniciar: {exc})")
+        return
+    if _SESSION is not None:
+        _SESSION.close()
+    _UI.close()
+    os._exit(0)
+
+
+# How often a running app asks whether a newer version exists (Parça
+# usually stays open in the tray for days; it only updates when it starts).
+UPDATE_CHECK_SECONDS = float(os.environ.get("UPDATE_CHECK_SECONDS", "") or 3 * 3600)
+
+
+def _watch_for_updates() -> None:
+    """Daemon thread: every UPDATE_CHECK_SECONDS, if a newer version is out,
+    show the "new version - restart?" notice. Repeats each check until the
+    tester restarts; silent on any failure."""
+    from client.updater import available_update
+
+    while True:
+        time.sleep(UPDATE_CHECK_SECONDS)
+        version = available_update()
+        if version:
+            print(f"(nova versão disponível: {version})")
+            _UI.notice("update", version=version)
+
+
+ANNOUNCE_SEEN_PATH = None  # set lazily: %APPDATA%/Parca/announcements_seen.json
+
+
+def _show_announcement(announce: dict | None) -> None:
+    """The server's current announcement (auth_ok), once per id."""
+    if not announce:
+        return
+    from client.config import USER_SETTINGS_DIR
+
+    path = USER_SETTINGS_DIR / "announcements_seen.json"
+    try:
+        seen = set(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        seen = set()
+    if announce["id"] in seen:
+        return
+    text = announce.get("en" if texts.language() == "en" else "pt") or announce.get("pt") or ""
+    if not text:
+        return
+    _UI.notice("announce", text=text)
+    seen.add(announce["id"])
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(sorted(seen)), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def _relaunch_as_admin() -> None:
