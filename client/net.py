@@ -24,6 +24,16 @@ import struct
 import threading
 
 
+def _app_version() -> str:
+    """This app's version, sent on connect so the server knows which
+    testers still run an old updater (client/VERSION)."""
+    from pathlib import Path
+    try:
+        return (Path(__file__).resolve().parent / "VERSION").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 class ServerError(RuntimeError):
     """Raised on a failed connection or handshake, or a closed/broken
     connection encountered mid-call."""
@@ -60,7 +70,8 @@ class ServerSession:
         self.close()
         try:
             self._ws = connect(
-                self.server_url, additional_headers={"Authorization": f"Bearer {self.token}"},
+                self.server_url, additional_headers={"Authorization": f"Bearer {self.token}",
+                                                     "X-Parca-Version": _app_version()},
                 open_timeout=timeout,
             )
             raw = self._ws.recv(timeout=timeout)

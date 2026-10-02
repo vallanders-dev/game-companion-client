@@ -1,12 +1,19 @@
-"""client/updater.py — startup update check against the public client repo.
+"""client/updater.py — startup update check.
 
 Runs once, at the top of `client.main.main()`. Never blocks launch: every
-failure (no network, no git, dirty tree, GitHub down) prints at most one line
+failure (no network, no git, dirty tree, server down) prints at most one line
 and the current version keeps running.
+
+Where the newest version comes from (since v0.1.12, 2026-10-02): Parça's own
+server, `UPDATE_BASE/v1/client/latest`, which also serves the release zip
+with its sha256 - checked before anything is written, so a damaged or
+swapped download is refused. Only if our server can't answer does it fall
+back to the public GitHub repo (the way v0.1.0-v0.1.11 updated). Moving off
+GitHub lets the client repo go private and the files move anywhere later.
 
   * An install made by Parca-Setup.exe or `instalar-parca.cmd` (marked by
     INSTALL_MARKER, no git needed): if the latest release is newer, download
-    that release's zip from GitHub, sync it over the program folder (the
+    that release's zip, sync it over the program folder (the
     Python it runs on - runtime/ from the setup, .venv from the .cmd - and
     the tester's own files - client/output, client/.env*, client/config.json
     - are never touched), reinstall requirements only if they changed, and
@@ -36,7 +43,9 @@ from pathlib import Path
 
 PUBLIC_REPO = "vallanders-dev/game-companion-client"
 RELEASES_URL = f"https://api.github.com/repos/{PUBLIC_REPO}/releases/latest"
-DOWNLOAD_URL = f"https://github.com/{PUBLIC_REPO}/releases/latest"
+# Our server; PARCA_UPDATE_BASE overrides it (tests, a local server).
+UPDATE_BASE = os.environ.get("PARCA_UPDATE_BASE", "").strip().rstrip("/") or "https://api.parcaplay.com"
+DOWNLOAD_URL = "https://parcaplay.com/baixar"
 PACKAGE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = PACKAGE_DIR.parent
 VERSION_FILE = PACKAGE_DIR / "VERSION"
@@ -62,11 +71,25 @@ def _parse(version: str) -> tuple[int, ...]:
     return tuple(parts)
 
 
-def _latest_release_version(timeout: float = 5.0) -> str | None:
+def _latest_release(timeout: float = 5.0) -> dict | None:
+    """{"version", "zip_url", "sha256"}: from our server, or - if it can't
+    answer - from GitHub (no sha256 there). None when neither knows."""
+    try:
+        with urllib.request.urlopen(f"{UPDATE_BASE}/v1/client/latest", timeout=timeout) as resp:  # noqa: S310
+            info = json.load(resp)
+        version = str(info.get("version") or "").lstrip("vV")
+        if version and info.get("zip") and info.get("zip_sha256"):
+            return {"version": version, "zip_url": f"{UPDATE_BASE}/releases/{info['zip']}",
+                    "sha256": str(info["zip_sha256"]).lower()}
+    except Exception:  # noqa: BLE001 - try GitHub instead
+        pass
     req = urllib.request.Request(RELEASES_URL, headers={"Accept": "application/vnd.github+json"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - fixed https URL
-        tag = json.load(resp).get("tag_name") or ""
-    return tag.lstrip("vV") or None
+        tag = (json.load(resp).get("tag_name") or "").lstrip("vV")
+    if not tag:
+        return None
+    return {"version": tag, "zip_url": f"https://github.com/{PUBLIC_REPO}/archive/refs/tags/v{tag}.zip",
+            "sha256": None}
 
 
 def _git(*args: str) -> subprocess.CompletedProcess:
@@ -98,10 +121,12 @@ def _requirements_hash() -> str:
         return ""
 
 
-def _download_release_zip(version: str) -> bytes:
-    url = f"https://github.com/{PUBLIC_REPO}/archive/refs/tags/v{version}.zip"
-    with urllib.request.urlopen(url, timeout=60) as resp:  # noqa: S310 - fixed https URL
-        return resp.read()
+def _download_release_zip(release: dict) -> bytes:
+    with urllib.request.urlopen(release["zip_url"], timeout=120) as resp:  # noqa: S310 - our server or GitHub
+        data = resp.read()
+    if release.get("sha256") and hashlib.sha256(data).hexdigest() != release["sha256"]:
+        raise RuntimeError("o arquivo baixado não confere (sha256) - atualização recusada")
+    return data
 
 
 def _is_protected(rel: Path) -> bool:
@@ -109,10 +134,24 @@ def _is_protected(rel: Path) -> bool:
                for part in rel.parts)
 
 
-def _apply_release_zip(data: bytes, root: Path = REPO_ROOT) -> None:
-    """Makes `root` match the release: adds/overwrites every file in it and
-    removes program files the release no longer has - never anything
-    `_is_protected()`. GitHub's archive zips hold one top-level folder."""
+def _safe_install_root(root: Path) -> None:
+    """Refuses any folder that isn't a real Parça install. This sync deletes
+    files the release doesn't have, so pointed at the wrong folder it wipes
+    it - on 2026-10-02 a test harness that swapped REPO_ROOT (which the old
+    `root=REPO_ROOT` default had already captured at import) ran it against
+    the developer's own repository and deleted most of it, git data
+    included. An install always has the marker and never a .git folder."""
+    if not (root / ".parca-install").is_file() or (root / ".git").exists():
+        raise RuntimeError(f"{root} não é uma instalação do Parça - atualização recusada")
+
+
+def _apply_release_zip(data: bytes, root: Path | None = None) -> None:
+    """Makes `root` (default: REPO_ROOT, read at call time) match the
+    release: adds/overwrites every file in it and removes program files the
+    release no longer has - never anything `_is_protected()`. The zip holds
+    one top-level folder. Only ever on a real install (`_safe_install_root`)."""
+    root = Path(root) if root is not None else REPO_ROOT
+    _safe_install_root(root)
     with tempfile.TemporaryDirectory() as tmp:
         zipfile.ZipFile(io.BytesIO(data)).extractall(tmp)
         tops = [d for d in Path(tmp).iterdir() if d.is_dir()]
@@ -155,9 +194,10 @@ def check_for_update() -> bool:
         return False
     current = local_version()
     try:
-        latest = _latest_release_version()
-    except Exception:  # noqa: BLE001 - offline / GitHub unreachable: run what we have
+        release = _latest_release()
+    except Exception:  # noqa: BLE001 - offline / nobody reachable: run what we have
         return False
+    latest = release["version"] if release else ""
     if not latest or _parse(latest) <= _parse(current):
         return False
 
@@ -169,7 +209,7 @@ def check_for_update() -> bool:
         print(f"Atualizando {current} -> {latest}...")
         before = _requirements_hash()
         try:
-            _apply_release_zip(_download_release_zip(latest))
+            _apply_release_zip(_download_release_zip(release))
         except Exception as exc:  # noqa: BLE001 - keep running the current version
             print(f"  (não consegui atualizar: {exc} - seguindo na versão {current})")
             return False
