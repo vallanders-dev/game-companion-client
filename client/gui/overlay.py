@@ -332,8 +332,8 @@ class OverlayWindow(QWidget):
         by request - a beta tester's own remaining-calls-today count,
         painted as a small pill below the orb. Not the question/answer
         panel (still gone, see the module docstring) - just this number."""
-        remaining = max(0, cap - calls_made)
-        self._usage_text = f"{remaining} restantes hoje"
+        from client.gui.ui_texts import questions  # uses -> estimated questions
+        self._usage_text = f"~{questions(cap - calls_made)} restantes hoje"
         self.update()
 
     def set_click_through(self, enabled: bool) -> None:

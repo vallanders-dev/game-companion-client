@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 
 from client.gui.fonts import BODY_FAMILY, HEADING_FAMILY, ensure_fonts_loaded
 from client.gui.orb import breathing_scale, draw_sphere, sphere_image, state_color
-from client.gui.ui_texts import ui
+from client.gui.ui_texts import questions, ui
 
 WINDOW_W, WINDOW_H = 440, 780
 RADIUS = 12
@@ -456,7 +456,8 @@ class MainWindow(QWidget):
         if self.usage:
             count, cap = self.usage
             left = max(0, cap - count)
-            self.s_usage.setText(f"<b>{left}</b> <span style='color:{TEXT_2}'>{ui(L, 'usage_left', cap=cap)}</span>")
+            self.s_usage.setText(f"<b>~{questions(left)}</b> <span style='color:{TEXT_2}'>"
+                                 f"{ui(L, 'usage_left', cap=questions(cap))}</span>")
             self.s_bar.setValue(round(100 * left / cap) if cap else 0)
         else:
             self.s_usage.setText(f"<span style='color:{TEXT_2}'>—</span>")

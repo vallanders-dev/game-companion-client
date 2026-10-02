@@ -16,7 +16,7 @@ UI = {
         "conn_offline": "Sem conexão, tentando de novo…",
         "game": "JOGO", "game_none": "Nenhum jogo em foco", "game_none_sub": "Abra o jogo e ele aparece aqui",
         "game_sub": "Detectado automaticamente",
-        "usage": "PERGUNTAS HOJE", "usage_left": "restantes de {cap}",
+        "usage": "PERGUNTAS HOJE", "usage_left": "restantes de ~{cap}",
         "key_ask": "Perguntar", "key_note": "Anotar", "key_pad": "Controle",
         "voice": "VOZ", "settings": "Configurações",
         "footer": "Fechar esta janela não desliga o Parça: ele continua na bandeja.",
@@ -51,7 +51,7 @@ UI = {
         "conn_offline": "No connection, retrying…",
         "game": "GAME", "game_none": "No game in focus", "game_none_sub": "Open your game and it shows up here",
         "game_sub": "Detected automatically",
-        "usage": "QUESTIONS TODAY", "usage_left": "left of {cap}",
+        "usage": "QUESTIONS TODAY", "usage_left": "left of ~{cap}",
         "key_ask": "Ask", "key_note": "Note", "key_pad": "Controller",
         "voice": "VOICE", "settings": "Settings",
         "footer": "Closing this window doesn't stop Parça: it keeps running in the tray.",
@@ -74,6 +74,18 @@ UI = {
         "offline_body": "Parça keeps retrying on its own. Check your internet.",
     },
 }
+
+
+# The server counts USES (a paid call each), not questions: a question costs
+# about 4 (speech-to-text, the screen read, the answer, the voice) and 5 when
+# Parça searches the web. Players think in questions, so the app shows an
+# estimate - "~38 restantes de ~50" for 48 uses used of 200 - never the raw
+# use count labeled as questions (what it did until v0.1.11).
+USES_PER_QUESTION = 4
+
+
+def questions(uses: int) -> int:
+    return max(0, uses) // USES_PER_QUESTION
 
 
 def ui(lang: str, key: str, **kw) -> str:
