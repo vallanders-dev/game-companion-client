@@ -21,8 +21,8 @@ UI = {
         "voice": "VOZ", "settings": "Configurações",
         "footer": "Fechar esta janela não desliga o Parça: ele continua na bandeja.",
         "wait_title": "Abra um jogo",
-        "wait_body": "O Parça reconhece o jogo sozinho assim que ele estiver na tela. "
-                     "Depois é só apertar {ask} e perguntar.",
+        "wait_body": "O Parça reconhece a maioria dos jogos sozinho assim que eles estão na tela. "
+                     "Jogo no navegador ou não reconhecido? Aperte {ask} e diga o nome do jogo.",
         "wait_tips": "ANTES DE JOGAR",
         "tip_window_b": "Janela sem bordas.",
         "tip_window": "Em tela cheia exclusiva o Windows pode esconder as teclas do Parça.",
@@ -60,8 +60,8 @@ UI = {
         "voice": "VOICE", "settings": "Settings",
         "footer": "Closing this window doesn't stop Parça: it keeps running in the tray.",
         "wait_title": "Open a game",
-        "wait_body": "Parça recognizes your game on its own as soon as it's on screen. "
-                     "Then just press {ask} and ask.",
+        "wait_body": "Parça recognizes most games on its own as soon as they're on screen. "
+                     "Browser game, or not recognized? Press {ask} and say the game's name.",
         "wait_tips": "BEFORE YOU PLAY",
         "tip_window_b": "Borderless window.",
         "tip_window": "In exclusive fullscreen Windows may hide Parça's keys.",

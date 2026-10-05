@@ -34,6 +34,17 @@ def _app_version() -> str:
         return ""
 
 
+def _exclusive(method):
+    """Runs a request while holding the session's I/O lock, so the
+    background keepalive (start_keepalive) never touches the connection in
+    the middle of a turn."""
+    def wrapper(self, *args, **kwargs):
+        with self._io_lock:
+            return method(self, *args, **kwargs)
+    wrapper.__name__, wrapper.__doc__ = method.__name__, method.__doc__
+    return wrapper
+
+
 class ServerError(RuntimeError):
     """Raised on a failed connection or handshake, or a closed/broken
     connection encountered mid-call."""
@@ -60,6 +71,9 @@ class ServerSession:
         self.usage: tuple[int, int] | None = None
         self.announce: dict | None = None   # the server's current announcement, if any
         self._ws = None
+        self._io_lock = threading.RLock()  # requests vs the keepalive watcher
+        self._keepalive: threading.Thread | None = None
+        self._stop = threading.Event()
 
     # -- lifecycle ------------------------------------------------------------
     def connect(self, timeout: float = 15.0) -> str:
@@ -92,6 +106,64 @@ class ServerSession:
         announce = msg.get("announce")
         self.announce = announce if isinstance(announce, dict) and announce.get("id") else None
         return self.display_name
+
+    def connected(self) -> bool:
+        """True while the WebSocket is open (the library's own pings mark a
+        dead connection closed within ~40 s; a server restart closes it at
+        once)."""
+        ws = self._ws
+        if ws is None:
+            return False
+        try:
+            from websockets.protocol import State
+            return ws.state is State.OPEN
+        except Exception:  # noqa: BLE001 - unknown library shape: assume alive, requests still self-heal
+            return True
+
+    def start_keepalive(self, on_status=None, interval: float = 5.0, max_interval: float = 30.0) -> None:
+        """Reconnects in the background as soon as the connection is gone
+        (a deploy restarting the server, the PC waking up, a network blip),
+        instead of at the player's next question - where a slow DNS lookup
+        or handshake used to add many seconds to that question (14 s seen
+        live, 2026-10-05, through a VPN's DNS). Never touches the connection
+        while a request holds it. `on_status("ok" | "offline" | "auth")` is
+        called when the state changes. Daemon thread; stop_keepalive() ends it."""
+        if self._keepalive is not None:
+            return
+        self._stop.clear()
+
+        def loop():
+            wait, last = interval, "ok"
+            while not self._stop.wait(wait):
+                if not self._io_lock.acquire(blocking=False):
+                    wait = interval  # a turn is using the connection right now
+                    continue
+                try:
+                    if self.connected():
+                        status, wait = "ok", interval
+                    else:
+                        try:
+                            self.connect(timeout=10.0)
+                            status, wait = "ok", interval
+                        except AuthError:
+                            status, wait = "auth", max_interval
+                        except ServerError:
+                            status, wait = "offline", min(max_interval, wait * 2)
+                finally:
+                    self._io_lock.release()
+                if status != last and on_status is not None:
+                    try:
+                        on_status(status)
+                    except Exception:  # noqa: BLE001 - a UI hiccup must not stop the watcher
+                        pass
+                last = status
+
+        self._keepalive = threading.Thread(target=loop, name="server-keepalive", daemon=True)
+        self._keepalive.start()
+
+    def stop_keepalive(self) -> None:
+        self._stop.set()
+        self._keepalive = None
 
     def close(self) -> None:
         if self._ws is not None:
@@ -133,6 +205,7 @@ class ServerSession:
         return {"voice": self.voice} if self.voice else {}
 
     # -- ask turn ---------------------------------------------------------------
+    @_exclusive
     def ask(
         self,
         turn_id: str,
@@ -227,6 +300,7 @@ class ServerSession:
             # different flow): ignored here - this is the ask-turn pump only.
 
     # -- F6 remember-note (multi-round) --------------------------------------
+    @_exclusive
     def remember(
         self,
         turn_id: str,
@@ -316,6 +390,7 @@ class ServerSession:
             # loop later; this method keeps the common path simple).
 
     # -- voice game-detection fallback -------------------------------------
+    @_exclusive
     def stt_request(self, wav_bytes: bytes, timeout: float = 30.0) -> tuple[str, str | None]:
         """The voice game-detection fallback's one-shot RPC (see the
         approved plan and `server/session.py`'s `run_stt_request()`) -

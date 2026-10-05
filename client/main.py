@@ -134,16 +134,29 @@ def _known_game_names(settings) -> list[str]:
     return sorted({a["canonical_game"] for a in aliases if a.get("canonical_game")})
 
 
-def _wait_for_game_or_trigger(settings, triggers) -> tuple[str | None, object | None]:
+def _voice_setting_changed() -> bool:
+    """True when the settings window saved a different voice (and with it,
+    maybe a different language) than the one this copy is using."""
+    try:
+        return load_saved_voice() != _voice
+    except Exception:  # noqa: BLE001 - an unreadable settings file changes nothing
+        return False
+
+
+def _wait_for_game_or_trigger(settings, triggers, stop=None) -> tuple[str | None, object | None]:
     """Silently wait until EITHER `detect_game()` finds a known game OR the
-    player fires a trigger - ported unchanged from `main._wait_for_game_or_trigger()`
-    (pure local logic, no server involvement at all)."""
+    player fires a trigger - ported from `main._wait_for_game_or_trigger()`
+    (pure local logic, no server involvement at all). `stop()`, polled at the
+    same pace, ends the wait with (None, None) - a voice/language changed in
+    the settings window, applied by the caller right away."""
     for t in triggers:
         t.clear()
     while True:
         detected = detect_game(settings.game_aliases_path)
         if detected:
             return detected, None
+        if stop is not None and stop():
+            return None, None
         fired = next((t for t in triggers if t.pressed()), None)
         if fired is not None and _PAUSED.is_set():
             fired.clear()
@@ -413,6 +426,9 @@ def cmd_ask(_args: argparse.Namespace) -> int:
     _SESSION = session
     print(t("connected", name=display_name))
     _UI.connection("ok")
+    # Reconnects in the background whenever the connection drops, so a
+    # question never waits for it (and the window's status stays true).
+    session.start_keepalive(on_status=lambda status: _UI.connection("ok" if status == "ok" else "offline"))
     if session.usage:
         _UI.usage(*session.usage)
 
@@ -454,8 +470,11 @@ def cmd_ask(_args: argparse.Namespace) -> int:
     pending_fired = None
 
     while True:
-        # A voice picked in the settings window ("Parça - Configurações")
-        # while this copy runs applies from the next turn on.
+        # A voice (and language) picked in the settings window while this
+        # copy runs. Both waits below end as soon as one is saved, so it
+        # applies within a poll of the window closing - not only after the
+        # next question, which then still used the old language (live
+        # report, 2026-10-04).
         saved_voice = load_saved_voice()
         if saved_voice != _voice:
             _set_voice(saved_voice)
@@ -473,11 +492,13 @@ def cmd_ask(_args: argparse.Namespace) -> int:
         elif active_game:
             game = active_game
         else:
-            found, fired = _wait_for_game_or_trigger(settings, all_triggers)
+            found, fired = _wait_for_game_or_trigger(settings, all_triggers, stop=_voice_setting_changed)
             if found:
                 active_game = found
                 game = found
                 _announce_game(settings, found)
+            elif fired is None:
+                continue  # the settings window changed the voice: applied at the top
             else:
                 resolved, is_freeform = resolve_active_game_by_voice(settings, session)
                 if resolved:
@@ -493,7 +514,9 @@ def cmd_ask(_args: argparse.Namespace) -> int:
                     continue
 
         def _foreground_game_changed() -> bool:
-            return detect_game(settings.game_aliases_path) not in (None, active_game)
+            # Also "changed": a new voice/language saved in the settings
+            # window - the loop's top applies it before the next question.
+            return _voice_setting_changed() or detect_game(settings.game_aliases_path) not in (None, active_game)
 
         scene_prompt = t("scene_prompt", ask=_fmt(manager.hotkey), note=_fmt(remember_manager.hotkey))
         if pending_fired is not None:

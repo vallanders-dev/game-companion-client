@@ -92,9 +92,17 @@ def _latest_release(timeout: float = 5.0) -> dict | None:
             "sha256": None}
 
 
+# git and pip are console programs: started from the windowless app (pythonw)
+# without this flag, Windows opens a console window for each call, which
+# flashes on screen and closes (seen 2026-10-05: every startup and every
+# 3-hour update check in a git checkout).
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
 def _git(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git", "-C", str(REPO_ROOT), *args], capture_output=True, text=True, timeout=60,
+        creationflags=_NO_WINDOW,
     )
 
 
@@ -177,7 +185,7 @@ def _reinstall_requirements_if_changed(before: str) -> None:
     print("  Instalando dependências novas...")
     pip = subprocess.run(
         [sys.executable, "-m", "pip", "install", "-r", str(REPO_ROOT / "requirements.txt")],
-        capture_output=True, text=True,
+        capture_output=True, text=True, creationflags=_NO_WINDOW,
     )
     if pip.returncode != 0:
         print("  (falha ao instalar dependências - rode "
