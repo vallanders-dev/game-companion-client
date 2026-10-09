@@ -1,6 +1,6 @@
 """client/gui/ui_process.py — python -m client.gui.ui_process
 
-Every piece of Parça's desktop UI, as ONE standalone Qt process driven by
+Every piece of Ombri's desktop UI, as ONE standalone Qt process driven by
 client/gui/client.py (see that module for why the UI is never a Qt loop
 inside the voice client). Until 2026-09-29 this was overlay_process.py and
 held only the in-game orb; stage 1 of the desktop UI added, to the approved
@@ -8,7 +8,7 @@ mockup:
 
   * the main window (client/gui/main_window.py) - shown at launch, hidden
     to the tray by its minimize/close buttons;
-  * the tray icon and its menu: Abrir Parça, Pausar/Retomar, Configurações,
+  * the tray icon and its menu: Abrir Ombri, Pausar/Retomar, Configurações,
     Sair (Qt's own tray icon - the pystray one in client/tray.py is no
     longer used by the client);
   * notices as a small pop-up above the tray (the game-runs-as-admin one
@@ -147,7 +147,7 @@ class Notice(QWidget):
         dot = QLabel()
         dot.setPixmap(QPixmap.fromImage(sphere_image(28)).scaled(
             14, 14, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-        app = QLabel("Parça")
+        app = QLabel("Ombri")
         app.setStyleSheet(f"font-size: 12px; color: {CHIP_TEXT};")
         head.addWidget(dot)
         head.addWidget(app)
@@ -213,7 +213,7 @@ class TrayHeader(QWidget):
         row.addWidget(orb)
         col = QVBoxLayout()
         col.setSpacing(2)
-        name = QLabel("Parça")
+        name = QLabel("Ombri")
         name.setStyleSheet(f'font-family: "{HEADING_FAMILY}"; font-size: 15px; font-weight: 600; color: {TEXT};')
         self.status = QLabel()
         self.status.setStyleSheet(f'font-family: "{BODY_FAMILY}"; font-size: 12px; color: {TEXT_2};')
@@ -238,7 +238,7 @@ class Ui:
         self.window.hidden_to_tray.connect(self._hidden)
 
         self.tray = QSystemTrayIcon(QIcon(QPixmap.fromImage(sphere_image(64))))
-        self.tray.setToolTip("Parça")
+        self.tray.setToolTip("Ombri")
         self.menu = QMenu()
         self.menu.setWindowFlags(self.menu.windowFlags() | Qt.WindowType.FramelessWindowHint
                                  | Qt.WindowType.NoDropShadowWindowHint)
@@ -280,7 +280,7 @@ class Ui:
         if self.window.game:
             status += f" · {self.window.game}"
         self.header.status.setText(status)
-        self.tray.setToolTip(f"Parça · {status}")
+        self.tray.setToolTip(f"Ombri · {status}")
 
     def _tray_click(self, reason) -> None:
         if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
@@ -289,7 +289,7 @@ class Ui:
     def _hidden(self) -> None:
         if not self.told_tray:
             self.told_tray = True
-            self.tray.showMessage("Parça", ui(self.window.lang, "still_running"),
+            self.tray.showMessage("Ombri", ui(self.window.lang, "still_running"),
                                   QIcon(QPixmap.fromImage(sphere_image(64))), 4000)
 
     def _show_state(self) -> None:

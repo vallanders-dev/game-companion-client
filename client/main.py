@@ -59,10 +59,12 @@ from client.capture import (
     foreground_game_needs_admin,
     load_game_aliases,
     prompt_scene,
+    remember_game_for_foreground,
     resolve_spoken_game,
 )
 from client import texts, voices
-from client.config import load_client_settings, load_saved_voice, save_token
+from client.config import (DEFAULT_SERVER_URL, FALLBACK_SERVER_URLS, load_client_settings, load_saved_voice,
+                           save_token)
 from client.fixed_audio import (
     FillerPlayer, load_fillers, load_line, mark_answer_started, play_before_answer, play_line,
 )
@@ -83,7 +85,7 @@ _voice = voices.DEFAULT_VOICE
 # The desktop UI (orb, main window, tray). A disabled HudClient until
 # cmd_ask() starts the real one - every method is a safe no-op either way.
 _UI = HudClient(False)
-# Set from the tray's "Pausar o Parça": triggers are ignored until resumed.
+# Set from the tray's "Pausar o Ombri": triggers are ignored until resumed.
 _PAUSED = threading.Event()
 _SESSION: "ServerSession | None" = None
 
@@ -400,7 +402,9 @@ def cmd_ask(_args: argparse.Namespace) -> int:
     print(t("connecting", url=settings.server_url))
     offline_told = False
     while True:
-        session = ServerSession(settings.server_url, settings.server_auth_token, voice=_voice)
+        fallbacks = FALLBACK_SERVER_URLS if settings.server_url == DEFAULT_SERVER_URL else ()
+        session = ServerSession(settings.server_url, settings.server_auth_token, voice=_voice,
+                                fallback_urls=fallbacks)
         try:
             display_name = session.connect()
             break
@@ -506,6 +510,11 @@ def cmd_ask(_args: argparse.Namespace) -> int:
                     game = resolved
                     _UI.game(resolved)
                     print(t("game_by_voice_free" if is_freeform else "game_by_voice", name=resolved))
+                    # Next time this game is detected without asking (this PC
+                    # only; capture.py pass 4).
+                    remembered = remember_game_for_foreground(resolved)
+                    if remembered:
+                        telemetry(f"  (lembrado neste PC: {remembered.name} = {resolved})")
                 else:
                     print(f"  {texts.spoken('game_unresolved')}")
                     play_line("game_unresolved", _voice)
@@ -796,7 +805,7 @@ def _restart_for_update() -> None:
     os._exit(0)
 
 
-# How often a running app asks whether a newer version exists (Parça
+# How often a running app asks whether a newer version exists (Ombri
 # usually stays open in the tray for days; it only updates when it starts).
 UPDATE_CHECK_SECONDS = float(os.environ.get("UPDATE_CHECK_SECONDS", "") or 3 * 3600)
 
@@ -908,7 +917,8 @@ def _claim_once() -> bool:
 
 
 SETTINGS_SHORTCUT_NAME = "Parça - Configurações.lnk"  # v0.1.6-v0.1.7 only; removed by _tidy_shortcuts()
-LAUNCH_SHORTCUT_NAME = "Parça.lnk"
+OLD_LAUNCH_SHORTCUT_NAME = "Parça.lnk"  # before the Ombri rename; replaced by _tidy_shortcuts()
+LAUNCH_SHORTCUT_NAME = "Ombri.lnk"
 ICON_PATH = ROOT / "client" / "assets" / "parca.ico"
 
 
@@ -932,42 +942,46 @@ def _log_without_console() -> None:
 
 
 def _tidy_shortcuts() -> None:
-    """Once per installed PC (2026-09-29, v0.1.8): Parça has ONE icon.
-    The settings window is reached from the main window and the tray now,
-    so the old "Parça - Configurações" desktop icon is removed; a desktop
-    "Parça" icon is updated only if the tester has one (the installer asks
-    whether to create it - a tester who said no, or deleted it, doesn't get
-    it back); a Start menu entry is always kept, so Parça can be found.
-    Both launch pythonw.exe (no console) with the Parça icon. Best-effort
-    and silent; recorded in settings.json."""
+    """Once per installed PC: the app's icons carry its current name. Since
+    the Parça -> Ombri rename (2026-10) the "Parça" Start menu entry becomes
+    "Ombri", and a desktop "Parça" icon becomes "Ombri" too - only if the
+    tester has one (the installer asks whether to create it; a tester who
+    said no, or deleted it, doesn't get it back). The old "Parça -
+    Configurações" icon (v0.1.6-v0.1.7) is removed. Both installs are
+    covered: Parca-Setup.exe's runtime/ and instalar-parca.cmd's .venv.
+    They launch pythonw.exe (no console) with the orb icon. Best-effort and
+    silent; recorded in settings.json."""
     from client.config import _read_user_settings, save_user_settings
     from client.updater import INSTALL_MARKER, REPO_ROOT
 
-    pythonw = REPO_ROOT / ".venv" / "Scripts" / "pythonw.exe"
-    if (not INSTALL_MARKER.exists() or not pythonw.exists()
-            or _read_user_settings().get("shortcuts_v3")):
+    pythonw = next((p for p in (REPO_ROOT / "runtime" / "pythonw.exe",
+                                REPO_ROOT / ".venv" / "Scripts" / "pythonw.exe") if p.exists()), None)
+    if not INSTALL_MARKER.exists() or pythonw is None or _read_user_settings().get("shortcuts_v4"):
         return
     script = (
         "$w = New-Object -ComObject WScript.Shell; "
         "$desk = [Environment]::GetFolderPath('Desktop'); $menu = [Environment]::GetFolderPath('Programs'); "
-        "$old = Join-Path $desk $env:PARCA_SET_LNK; if (Test-Path $old) { Remove-Item $old }; "
+        "$set = Join-Path $desk $env:PARCA_SET_LNK; if (Test-Path $set) { Remove-Item $set }; "
         "$targets = @((Join-Path $menu $env:PARCA_LNK)); "
-        "if (Test-Path (Join-Path $desk $env:PARCA_LNK)) { $targets += (Join-Path $desk $env:PARCA_LNK) }; "
+        "if ((Test-Path (Join-Path $desk $env:PARCA_OLD_LNK)) -or (Test-Path (Join-Path $desk $env:PARCA_LNK))) "
+        "{ $targets += (Join-Path $desk $env:PARCA_LNK) }; "
         "foreach ($t in $targets) { $s = $w.CreateShortcut($t); $s.TargetPath = $env:PARCA_PYW; "
         "$s.Arguments = '-m client.main'; $s.WorkingDirectory = $env:PARCA_HOME; "
-        "if (Test-Path $env:PARCA_ICO) { $s.IconLocation = $env:PARCA_ICO }; $s.Save() }"
+        "if (Test-Path $env:PARCA_ICO) { $s.IconLocation = $env:PARCA_ICO }; $s.Save() }; "
+        "foreach ($d in @($desk, $menu)) { $o = Join-Path $d $env:PARCA_OLD_LNK; if (Test-Path $o) { Remove-Item $o } }"
     )
     try:
         done = subprocess.run(
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
-            env=dict(os.environ, PARCA_LNK=LAUNCH_SHORTCUT_NAME, PARCA_SET_LNK=SETTINGS_SHORTCUT_NAME,
-                     PARCA_PYW=str(pythonw), PARCA_HOME=str(REPO_ROOT), PARCA_ICO=str(ICON_PATH)),
+            env=dict(os.environ, PARCA_LNK=LAUNCH_SHORTCUT_NAME, PARCA_OLD_LNK=OLD_LAUNCH_SHORTCUT_NAME,
+                     PARCA_SET_LNK=SETTINGS_SHORTCUT_NAME, PARCA_PYW=str(pythonw), PARCA_HOME=str(REPO_ROOT),
+                     PARCA_ICO=str(ICON_PATH)),
             capture_output=True, timeout=20, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         ).returncode == 0
     except Exception:  # noqa: BLE001
         done = False
     if done:
-        save_user_settings(shortcuts_v3=True)
+        save_user_settings(shortcuts_v4=True)
 
 
 def main(argv: list[str] | None = None) -> int:

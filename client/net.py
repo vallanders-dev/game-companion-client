@@ -61,8 +61,13 @@ def _unpack_audio_frame(frame: bytes) -> tuple[int, bytes]:
 
 
 class ServerSession:
-    def __init__(self, server_url: str, token: str, voice: str | None = None) -> None:
+    def __init__(self, server_url: str, token: str, voice: str | None = None,
+                 fallback_urls: tuple[str, ...] = ()) -> None:
         self.server_url = server_url
+        # Same server under an older address (the Parça -> Ombri rename,
+        # 2026-10): tried only when server_url can't be reached at all - a
+        # PC whose DNS filter blocks a brand-new domain still gets in.
+        self.fallback_urls = tuple(u for u in fallback_urls if u != server_url)
         self.token = token
         self.voice = voice
         self.display_name = ""
@@ -83,16 +88,23 @@ class ServerSession:
         from websockets.sync.client import connect
 
         self.close()
-        try:
-            self._ws = connect(
-                self.server_url, additional_headers={"Authorization": f"Bearer {self.token}",
-                                                     "X-Parca-Version": _app_version()},
-                open_timeout=timeout,
-            )
-            raw = self._ws.recv(timeout=timeout)
-        except Exception as exc:  # noqa: BLE001 - connection/handshake failure, not our business which kind
-            self.close()
-            raise ServerError(f"não consegui conectar ao servidor: {exc}") from exc
+        failure: Exception | None = None
+        for url in (self.server_url, *self.fallback_urls):
+            try:
+                self._ws = connect(
+                    url, additional_headers={"Authorization": f"Bearer {self.token}",
+                                             "X-Parca-Version": _app_version()},
+                    open_timeout=timeout,
+                )
+                raw = self._ws.recv(timeout=timeout)
+            except Exception as exc:  # noqa: BLE001 - connection/handshake failure, not our business which kind
+                self.close()
+                failure = exc
+                continue
+            self.server_url = url  # stick with the address that answered
+            break
+        else:
+            raise ServerError(f"não consegui conectar ao servidor: {failure}") from failure
         msg = json.loads(raw)
         if msg.get("type") == "auth_error":
             self.close()

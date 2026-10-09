@@ -1,4 +1,4 @@
-"""client/gui/orb.py — the Parça sphere, drawn with QPainter.
+"""client/gui/orb.py — the Ombri sphere, drawn with QPainter.
 
 One drawing routine for every place the orb appears (the main window, the
 in-game overlay, the tray and window icons), matching the approved desktop
@@ -105,10 +105,10 @@ def sphere_image(size: int, color: str = ACCENT, glow: float = 0.0) -> QImage:
 
 
 def claim_taskbar_identity() -> None:
-    """Call before any window exists. Parça runs under pythonw.exe, so
+    """Call before any window exists. Ombri runs under pythonw.exe, so
     Windows would group its windows under Python in the taskbar and show
     Python's icon (seen on the first real install, 2026-09-29). Its own
-    AppUserModelID makes the taskbar use Parça's window icon instead."""
+    AppUserModelID makes the taskbar use Ombri's window icon instead."""
     if sys.platform != "win32":
         return
     try:

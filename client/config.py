@@ -36,9 +36,12 @@ except ImportError:
 PROJECT_ROOT = Path(__file__).resolve().parent  # client/, not the repo root
 USER_CONFIG_PATH = PROJECT_ROOT / "config.json"
 
-# The hosted Parça server. client/.env's SERVER_URL overrides it (local
-# development against `python -m server.main serve`).
-DEFAULT_SERVER_URL = "wss://api.parcaplay.com/v1/ws"
+# The hosted Ombri server. client/.env's SERVER_URL overrides it (local
+# development against `python -m server.main serve`). The same server still
+# answers at the pre-rename Parça address, the fallback if this one can't be
+# reached (client.net.ServerSession).
+DEFAULT_SERVER_URL = "wss://api.ombriplay.com/v1/ws"
+FALLBACK_SERVER_URLS = ("wss://api.parcaplay.com/v1/ws",)
 
 # Where a tester's token lives once entered in the first-launch window
 # (client/gui/token_dialog.py): their own Windows profile, outside the

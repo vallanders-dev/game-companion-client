@@ -48,15 +48,15 @@ TEXTS: dict[str, dict[str, str]] = {
         # Spoken once per detected game when the game runs as administrator
         # and the client doesn't - Windows then hides every key press.
         "game_needs_admin": "Atenção: o jogo está rodando como administrador, então o Windows não me deixa "
-                            "ouvir as teclas. Feche o Parça e abra de novo com o botão direito no ícone, em "
+                            "ouvir as teclas. Feche o Ombri e abra de novo com o botão direito no ícone, em "
                             "Executar como administrador.",
         "web_search": "Deixa eu pesquisar isso rapidinho.",
         "web_search_still": "Tô quase lá, só mais um instante.",
         # A second copy of the client (both would hear every key press and
         # answer twice - seen with the first tester).
-        "already_running": "O Parça já está aberto em outra janela. Feche a outra antes de abrir de novo.",
+        "already_running": "O Ombri já está aberto em outra janela. Feche a outra antes de abrir de novo.",
         # Played by the settings window's "Ouvir" button.
-        "sample": "Oi! Eu sou o Parça. É só apertar F8 e me perguntar o que quiser sobre o seu jogo.",
+        "sample": "Oi! Eu sou o Ombri. É só apertar F8 e me perguntar o que quiser sobre o seu jogo.",
     },
     "en": {
         "cap_reached": "The test's daily call limit has been reached. "
@@ -66,12 +66,12 @@ TEXTS: dict[str, dict[str, str]] = {
         "game_unresolved": "I couldn't identify the game by voice. Press F8 or F6 to try again.",
         "note_saved": "Noted.",
         "game_needs_admin": "Heads up: your game is running as administrator, so Windows won't let me hear "
-                            "your keys. Close Parça and open it again by right-clicking the icon and "
+                            "your keys. Close Ombri and open it again by right-clicking the icon and "
                             "choosing Run as administrator.",
         "web_search": "Let me look that up real quick.",
         "web_search_still": "Almost there, just a moment.",
-        "already_running": "Parça is already open in another window. Close that one before opening it again.",
-        "sample": "Hey! I'm Parça. Just press F8 and ask me anything about your game.",
+        "already_running": "Ombri is already open in another window. Close that one before opening it again.",
+        "sample": "Hey! I'm Ombri. Just press F8 and ask me anything about your game.",
     },
 }
 

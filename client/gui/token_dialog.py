@@ -1,9 +1,9 @@
-"""client/gui/token_dialog.py — Parça's settings window: tester token,
+"""client/gui/token_dialog.py — Ombri's settings window: tester token,
 language and voice.
 
 Runs as its OWN process (`python -m client.gui.token_dialog`), started by
 client.main when there is no token yet or the server rejected the saved one,
-and by the "Parça - Configurações" shortcut (`--reason settings`) - same
+and by the "Ombri - Configurações" shortcut (`--reason settings`) - same
 reason the overlay is a separate process: client.main never imports Qt.
 The token is checked against the real server before it's saved, so a typo
 or a revoked token is caught here, with a plain explanation, not later as a
@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout,
 )
 
-from client import voices
+from client import capture, voices
 from client.config import USER_SETTINGS_PATH, load_client_settings, load_saved_token, save_user_settings
 from client.gui.fonts import body_font, ensure_fonts_loaded, heading_font
 from client.gui.theme import DARK_THEME as T
@@ -43,10 +43,10 @@ REASONS = ("missing", "rejected", "settings")
 
 UI = {
     "pt": {
-        "title": "Parça — acesso ao beta",
-        "missing": "Cole abaixo o token de testador que você recebeu e escolha a voz do Parça.",
+        "title": "Ombri — acesso ao beta",
+        "missing": "Cole abaixo o token de testador que você recebeu e escolha a voz do Ombri.",
         "rejected": "O servidor não aceitou o token salvo. Cole um token válido abaixo.",
-        "settings": "Escolha o idioma e a voz do Parça. Deixe o token em branco pra manter o atual.",
+        "settings": "Escolha o idioma e a voz do Ombri. Deixe o token em branco pra manter o atual.",
         "language": "Idioma",
         "voice": "Voz",
         "listen": "Ouvir",
@@ -62,12 +62,17 @@ UI = {
         "saved": "Salvo! Vale a partir da próxima pergunta.",
         "rejected_status": "Esse token não foi aceito. Confira se copiou ele inteiro.",
         "unreachable": "Não consegui falar com o servidor. Verifique sua internet e tente de novo.",
+        "remembered": "Jogos lembrados",
+        "remembered_count": "{n} jogo(s) que você nomeou por voz",
+        "remembered_none": "nenhum",
+        "forget": "Esquecer",
+        "forgotten": "Esquecidos. Da próxima vez que um desses jogos abrir, o Ombri pergunta o nome de novo.",
     },
     "en": {
-        "title": "Parça — beta access",
-        "missing": "Paste the tester token you received below and choose Parça's voice.",
+        "title": "Ombri — beta access",
+        "missing": "Paste the tester token you received below and choose Ombri's voice.",
         "rejected": "The server didn't accept the saved token. Paste a valid token below.",
-        "settings": "Choose Parça's language and voice. Leave the token empty to keep the current one.",
+        "settings": "Choose Ombri's language and voice. Leave the token empty to keep the current one.",
         "language": "Language",
         "voice": "Voice",
         "listen": "Listen",
@@ -83,6 +88,11 @@ UI = {
         "saved": "Saved! It applies from your next question.",
         "rejected_status": "That token wasn't accepted. Make sure you copied all of it.",
         "unreachable": "I couldn't reach the server. Check your internet and try again.",
+        "remembered": "Remembered games",
+        "remembered_count": "{n} game(s) you named by voice",
+        "remembered_none": "none",
+        "forget": "Forget",
+        "forgotten": "Forgotten. Next time one of those games opens, Ombri asks for its name again.",
     },
 }
 
@@ -144,7 +154,7 @@ class TokenDialog(QDialog):
             start_voice = voices.get(voices.DEFAULT_VOICE_FOR[windows_language()])
         self.ui_language = start_voice.language
 
-        self.title = QLabel("Parça")
+        self.title = QLabel("Ombri")
         self.title.setObjectName("title")
         self.title.setFont(heading_font(QFont.Weight.Bold, 20))
         self.intro = QLabel()
@@ -163,6 +173,12 @@ class TokenDialog(QDialog):
         self.listen_btn.clicked.connect(self._listen)
         self.field = QLineEdit()
         self.field.returnPressed.connect(self._submit)
+        # Games the player named by voice (capture.py pass 4) - settings only.
+        self.remembered_label, self.remembered_info = QLabel(), QLabel()
+        self.remembered_label.setFont(body_font(QFont.Weight.DemiBold, 10))
+        self.remembered_info.setFont(body_font(QFont.Weight.Normal, 10))
+        self.forget_btn = QPushButton()
+        self.forget_btn.clicked.connect(self._forget_games)
         for w in (self.language_box, self.voice_box, self.field):
             w.setFont(body_font(QFont.Weight.Medium, 10.5))
 
@@ -176,7 +192,7 @@ class TokenDialog(QDialog):
         self.ok_btn.setObjectName("primary")
         self.ok_btn.setDefault(True)
         self.ok_btn.clicked.connect(self._submit)
-        for b in (self.cancel_btn, self.ok_btn, self.listen_btn):
+        for b in (self.cancel_btn, self.ok_btn, self.listen_btn, self.forget_btn):
             b.setFont(body_font(QFont.Weight.DemiBold, 10.5))
             b.setCursor(Qt.CursorShape.PointingHandCursor)
 
@@ -190,6 +206,10 @@ class TokenDialog(QDialog):
         grid.addWidget(self.listen_btn, 1, 2)
         grid.addWidget(self.token_label, 2, 0)
         grid.addWidget(self.field, 2, 1, 1, 2)
+        if self.reason == "settings":
+            grid.addWidget(self.remembered_label, 3, 0)
+            grid.addWidget(self.remembered_info, 3, 1)
+            grid.addWidget(self.forget_btn, 3, 2)
         grid.setColumnStretch(1, 1)
 
         buttons = QHBoxLayout()
@@ -237,6 +257,16 @@ class TokenDialog(QDialog):
         self.ok_btn.setText(self._s("save" if self.reason == "settings" else "connect"))
         keep = self.reason == "settings" and self.saved_token
         self.field.setPlaceholderText(self._s("token_keep" if keep else "token_placeholder"))
+        self.remembered_label.setText(self._s("remembered"))
+        self.forget_btn.setText(self._s("forget"))
+        n = capture.remembered_count()
+        self.remembered_info.setText(self._s("remembered_count", n=n) if n else self._s("remembered_none"))
+        self.forget_btn.setEnabled(n > 0)
+
+    def _forget_games(self) -> None:
+        capture.forget_remembered_games()
+        self._relabel()
+        self._set_status(self._s("forgotten"), T.states.listening)
 
     def _language_changed(self) -> None:
         self.ui_language = self.language_box.currentData()

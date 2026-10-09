@@ -4,14 +4,14 @@ Runs once, at the top of `client.main.main()`. Never blocks launch: every
 failure (no network, no git, dirty tree, server down) prints at most one line
 and the current version keeps running.
 
-Where the newest version comes from (since v0.1.12, 2026-10-02): Parça's own
+Where the newest version comes from (since v0.1.12, 2026-10-02): Ombri's own
 server, `UPDATE_BASE/v1/client/latest`, which also serves the release zip
 with its sha256 - checked before anything is written, so a damaged or
 swapped download is refused. Only if our server can't answer does it fall
 back to the public GitHub repo (the way v0.1.0-v0.1.11 updated). Moving off
 GitHub lets the client repo go private and the files move anywhere later.
 
-  * An install made by Parca-Setup.exe or `instalar-parca.cmd` (marked by
+  * An install made by Ombri-Setup.exe or `instalar-parca.cmd` (marked by
     INSTALL_MARKER, no git needed): if the latest release is newer, download
     that release's zip, sync it over the program folder (the
     Python it runs on - runtime/ from the setup, .venv from the .cmd - and
@@ -43,15 +43,17 @@ from pathlib import Path
 
 PUBLIC_REPO = "vallanders-dev/game-companion-client"
 RELEASES_URL = f"https://api.github.com/repos/{PUBLIC_REPO}/releases/latest"
-# Our server; PARCA_UPDATE_BASE overrides it (tests, a local server).
-UPDATE_BASE = os.environ.get("PARCA_UPDATE_BASE", "").strip().rstrip("/") or "https://api.parcaplay.com"
-DOWNLOAD_URL = "https://parcaplay.com/baixar"
+# Our server; PARCA_UPDATE_BASE overrides it (tests, a local server). The
+# same server under its pre-rename Parça address is tried next, then GitHub.
+UPDATE_BASE = os.environ.get("PARCA_UPDATE_BASE", "").strip().rstrip("/") or "https://api.ombriplay.com"
+FALLBACK_UPDATE_BASES = () if os.environ.get("PARCA_UPDATE_BASE", "").strip() else ("https://api.parcaplay.com",)
+DOWNLOAD_URL = "https://ombriplay.com/baixar"
 PACKAGE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = PACKAGE_DIR.parent
 VERSION_FILE = PACKAGE_DIR / "VERSION"
 INSTALL_MARKER = REPO_ROOT / ".parca-install"
 # Never overwritten or deleted by a zip update - the Python the program runs
-# on (runtime: Parca-Setup.exe's built-in one, with its uninstaller inside;
+# on (runtime: Ombri-Setup.exe's built-in one, with its uninstaller inside;
 # .venv: instalar-parca.cmd's) and the tester's own state.
 _PROTECTED = {"runtime", ".venv", ".parca-install", "output", "config.json", "__pycache__"}
 
@@ -74,15 +76,16 @@ def _parse(version: str) -> tuple[int, ...]:
 def _latest_release(timeout: float = 5.0) -> dict | None:
     """{"version", "zip_url", "sha256"}: from our server, or - if it can't
     answer - from GitHub (no sha256 there). None when neither knows."""
-    try:
-        with urllib.request.urlopen(f"{UPDATE_BASE}/v1/client/latest", timeout=timeout) as resp:  # noqa: S310
-            info = json.load(resp)
-        version = str(info.get("version") or "").lstrip("vV")
-        if version and info.get("zip") and info.get("zip_sha256"):
-            return {"version": version, "zip_url": f"{UPDATE_BASE}/releases/{info['zip']}",
-                    "sha256": str(info["zip_sha256"]).lower()}
-    except Exception:  # noqa: BLE001 - try GitHub instead
-        pass
+    for base in (UPDATE_BASE, *FALLBACK_UPDATE_BASES):
+        try:
+            with urllib.request.urlopen(f"{base}/v1/client/latest", timeout=timeout) as resp:  # noqa: S310
+                info = json.load(resp)
+            version = str(info.get("version") or "").lstrip("vV")
+            if version and info.get("zip") and info.get("zip_sha256"):
+                return {"version": version, "zip_url": f"{base}/releases/{info['zip']}",
+                        "sha256": str(info["zip_sha256"]).lower()}
+        except Exception:  # noqa: BLE001 - try the next address, then GitHub
+            continue
     req = urllib.request.Request(RELEASES_URL, headers={"Accept": "application/vnd.github+json"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - fixed https URL
         tag = (json.load(resp).get("tag_name") or "").lstrip("vV")
@@ -107,7 +110,7 @@ def _git(*args: str) -> subprocess.CompletedProcess:
 
 
 def _checkout_kind() -> str:
-    """'installed' (Parca-Setup.exe or instalar-parca.cmd), 'public' (a clone of
+    """'installed' (Ombri-Setup.exe or instalar-parca.cmd), 'public' (a clone of
     PUBLIC_REPO), 'other' (any other git checkout), or 'none' (not a git
     checkout, or git isn't installed)."""
     if INSTALL_MARKER.exists():
@@ -143,14 +146,14 @@ def _is_protected(rel: Path) -> bool:
 
 
 def _safe_install_root(root: Path) -> None:
-    """Refuses any folder that isn't a real Parça install. This sync deletes
+    """Refuses any folder that isn't a real Ombri install. This sync deletes
     files the release doesn't have, so pointed at the wrong folder it wipes
     it - on 2026-10-02 a test harness that swapped REPO_ROOT (which the old
     `root=REPO_ROOT` default had already captured at import) ran it against
     the developer's own repository and deleted most of it, git data
     included. An install always has the marker and never a .git folder."""
     if not (root / ".parca-install").is_file() or (root / ".git").exists():
-        raise RuntimeError(f"{root} não é uma instalação do Parça - atualização recusada")
+        raise RuntimeError(f"{root} não é uma instalação do Ombri - atualização recusada")
 
 
 def _apply_release_zip(data: bytes, root: Path | None = None) -> None:

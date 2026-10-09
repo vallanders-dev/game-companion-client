@@ -520,6 +520,212 @@ def foreground_game_needs_admin(aliases_path: Path) -> bool:
     return process_is_elevated(pid) is True and process_is_elevated() is False
 
 
+# --- Games no launcher knows (2026-10-06) -----------------------------------
+# A game started from an alternative launcher, GOG offline, itch.io, a USB key
+# or a plain folder matches neither the alias table nor Steam/Epic metadata
+# (Hugario's Dave the Diver sat on "Abra um jogo"). Two more passes, both
+# decided in code:
+#   4. the player's own earlier answer: when the voice fallback resolved a
+#      game, client.main remembers "this exe = that name" in a LOCAL file
+#      (this PC only, never game_aliases.json, never the server);
+#   5. the window's own title (else the exe's product name), only when
+#      the window fills its monitor (fullscreen/borderless, as games run and
+#      browsers/chat apps usually don't), the exe is not a known non-game or
+#      an Electron app, and the name isn't a generic engine/launcher label.
+REMEMBERED_GAMES_PATH = Path(os.environ.get("APPDATA") or Path.home()) / "Parca" / "remembered_games.json"
+
+# Exe stems (lowercase, no .exe) that are never games, however they're shown.
+_NOT_GAME_EXES = frozenset({
+    "explorer", "chrome", "msedge", "firefox", "opera", "opera_gx", "brave", "vivaldi", "iexplore",
+    "discord", "discordptb", "discordcanary", "slack", "teams", "ms-teams", "zoom", "skype", "whatsapp",
+    "telegram", "signal", "spotify", "vlc", "mpc-hc", "mpc-hc64", "mpc-be64", "mpv", "potplayermini64",
+    "potplayermini", "wmplayer", "video.ui", "applicationframehost", "obs64", "obs32", "streamlabs obs",
+    "steam", "steamwebhelper", "epicgameslauncher", "galaxyclient", "eadesktop", "origin", "upc",
+    "battle.net", "riotclientservices", "xboxapp", "gamebar", "code", "devenv", "notepad", "notepad++",
+    "winword", "excel", "powerpnt", "acrobat", "acrord32", "cmd", "powershell", "pwsh", "windowsterminal",
+    "taskmgr", "searchhost", "shellexperiencehost", "startmenuexperiencehost", "lockapp",
+    "systemsettings", "python", "pythonw", "hydra", "hydralauncher",
+    "microsoft.media.player", "microsoft.photos", "photos", "msteams", "olk", "outlook", "onenote",
+    "snippingtool", "screenclippinghost", "msedgewebview2", "kodi", "plex", "plexamp", "netflix",
+    "stremio", "jellyfinmediaplayer", "kmplayer64", "gom", "smplayer", "anydesk", "teamviewer",
+    "parsecd", "moonlight", "rustdesk", "vmware", "virtualboxvm", "obs", "nvidia share",
+    "nvcontainer", "radeonsoftware", "amdrsserv",
+})
+# Product names that say nothing about which game it is (compared folded).
+_GENERIC_PRODUCT_NAMES = frozenset({
+    "unrealgame", "ue4game", "ue5game", "unreal engine", "unity", "unity player", "unityplayer",
+    "godot engine", "godot", "game", "game client", "client", "launcher", "application", "app",
+    "microsoft windows operating system", "nw js", "electron", "chromium", "cef", "python",
+    "java tm platform se binary", "openjdk platform binary", "java", "javaw", "love", "renpy",
+    "loading", "carregando", "splash", "untitled", "default", "window", "main window", "sem titulo",
+})
+_product_name_cache: dict[str, str | None] = {}
+
+
+def _fold(text: str) -> str:
+    return " ".join(re.sub(r"[^\w]+", " ", text.lower()).split())
+
+
+def _is_electron_app(exe_path: Path) -> bool:
+    try:
+        return (exe_path.parent / "resources" / "app.asar").exists()
+    except OSError:
+        return False
+
+
+def _not_a_game_exe(exe_path: Path) -> bool:
+    windir = (os.environ.get("SystemRoot") or r"C:\Windows").lower().rstrip("\\") + "\\"
+    return (str(exe_path).lower().startswith(windir)
+            or _normalize_exe_stem(exe_path.name) in _NOT_GAME_EXES
+            or exe_path.stem.lower() in _NOT_GAME_EXES or _is_electron_app(exe_path))
+
+
+def clean_product_name(raw: str | None) -> str | None:
+    """A product/file-description string as a game name, or None when it's
+    empty or generic ("UnrealGame", "Unity Player", a launcher...)."""
+    if not raw:
+        return None
+    name = " ".join(re.sub(r"[\u2122\u00ae\u00a9]", " ", raw).split()).strip(" .-_")
+    folded = _fold(name)
+    if len(folded) < 2 or folded in _GENERIC_PRODUCT_NAMES:
+        return None
+    if any(w in folded.split() for w in ("launcher", "setup", "installer", "crashreporter", "updater")):
+        return None
+    if "microsoft windows" in folded or "sistema operacional" in folded:
+        return None   # Windows' own programs, in any display language
+    return name
+
+
+_TITLE_SEPARATORS = re.compile(r"\s+[-|–—:]\s+")
+_TITLE_NOISE = re.compile(r"\s*(\(.*?\)|\[.*?\]|\bv?\d+(\.\d+)+\w*|\b(dx1[12]|dx9|vulkan|opengl|64-bit|32-bit)\b)\s*",
+                          re.IGNORECASE)
+
+
+def clean_window_title(title: str | None) -> str | None:
+    """A game window's title as a game name: the part before " - " / " | ",
+    without versions, renderer tags or bracketed bits; None when generic.
+    Games mostly title their window with their own name ("DAVE THE DIVER",
+    "Risk of Rain 2") - more reliably than the exe's version resource, which
+    Unity players leave empty and Unreal fills with "UE4Game" or a codename
+    (measured on the installed REPO, Risk of Rain 2 and Tell Me Why)."""
+    if not title:
+        return None
+    head = _TITLE_SEPARATORS.split(title.strip(), maxsplit=1)[0]
+    return clean_product_name(_TITLE_NOISE.sub(" ", head))
+
+
+def exe_product_name(exe_path: Path) -> str | None:
+    """The game's own name from its exe's version resource (ProductName,
+    else FileDescription), cleaned; None when missing or generic. Cached."""
+    key = str(exe_path).lower()
+    if key in _product_name_cache:
+        return _product_name_cache[key]
+    name = None
+    try:
+        import win32api
+
+        langs = win32api.GetFileVersionInfo(str(exe_path), "\\VarFileInfo\\Translation") or [(0x0409, 0x04B0)]
+        for field in ("ProductName", "FileDescription"):
+            for lang, codepage in langs:
+                try:
+                    value = win32api.GetFileVersionInfo(
+                        str(exe_path), f"\\StringFileInfo\\{lang:04x}{codepage:04x}\\{field}")
+                except Exception:  # noqa: BLE001 - field missing in this language
+                    continue
+                name = clean_product_name(value)
+                if name:
+                    break
+            if name:
+                break
+    except Exception:  # noqa: BLE001 - no version resource, pywin32 missing
+        name = None
+    _product_name_cache[key] = name
+    return name
+
+
+def _window_fills_monitor(hwnd) -> bool:
+    """True when `hwnd` covers its whole monitor (exclusive or borderless
+    fullscreen), within 2 px. False on any doubt."""
+    try:
+        import win32api
+
+        rect = _window_bounds(hwnd)
+        if rect is None:
+            return False
+        monitor = win32api.GetMonitorInfo(win32api.MonitorFromWindow(hwnd, 2))["Monitor"]
+        left, top, right, bottom = rect["left"], rect["top"], rect["left"] + rect["width"], rect["top"] + rect["height"]
+        return all(abs(a - b) <= 2 for a, b in zip((left, top, right, bottom), monitor))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _remembered_games() -> dict:
+    try:
+        data = json.loads(REMEMBERED_GAMES_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def remembered_game_for(exe_path: Path) -> str | None:
+    entry = _remembered_games().get(str(exe_path).lower())
+    return entry.get("name") if isinstance(entry, dict) and entry.get("name") else None
+
+
+def remembered_count() -> int:
+    return len(_remembered_games())
+
+
+def forget_remembered_games() -> int:
+    """Settings window's "Esquecer": drop every remembered game on this PC.
+    Returns how many were forgotten. The app asks for the name again the
+    next time such a game is in front (detection re-reads the file)."""
+    count = remembered_count()
+    try:
+        REMEMBERED_GAMES_PATH.unlink(missing_ok=True)
+    except OSError:
+        return 0
+    return count
+
+
+def foreground_exe_path() -> Path | None:
+    try:
+        import win32gui
+        import win32process
+
+        hwnd = win32gui.GetForegroundWindow()
+        if not hwnd:
+            return None
+        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        if pid == os.getpid():
+            return None
+        return _process_image_path(pid)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def remember_game_for_foreground(name: str) -> Path | None:
+    """After the player NAMED the game by voice: remember "the foreground exe
+    = name" on this PC, so next time it's detected without asking. Skips
+    known non-games and Electron apps (Discord, a launcher...). Returns the
+    remembered exe path, or None when nothing was saved."""
+    name = (name or "").strip()
+    exe_path = foreground_exe_path()
+    if not name or exe_path is None or _not_a_game_exe(exe_path):
+        return None
+    data = _remembered_games()
+    data[str(exe_path).lower()] = {"name": name, "exe": exe_path.name,
+                                   "saved": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    try:
+        REMEMBERED_GAMES_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = REMEMBERED_GAMES_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp.replace(REMEMBERED_GAMES_PATH)
+    except OSError:
+        return None
+    return exe_path
+
+
 def _match_foreground_window(aliases_path: Path) -> tuple[int, str] | None:
     """The shared lookup behind `detect_game()` (name only) and
     `get_foreground_game_window_rect()` (also needs the hwnd, to crop
@@ -577,6 +783,18 @@ def _match_foreground_window(aliases_path: Path) -> tuple[int, str] | None:
     launcher_name = launcher_lookup.launcher_game_name(exe_path)
     if launcher_name:
         return hwnd, launcher_name
+
+    # Pass 4 (2026-10-06): the name this player gave by voice for this exe.
+    remembered = remembered_game_for(exe_path)
+    if remembered:
+        return hwnd, remembered
+
+    # Pass 5 (2026-10-06): the exe's own product name - only for a window
+    # that fills its monitor and an exe that isn't a known non-game.
+    if not _not_a_game_exe(exe_path) and _window_fills_monitor(hwnd):
+        name = clean_window_title(title) or exe_product_name(exe_path)
+        if name:
+            return hwnd, name
 
     return None
 
@@ -650,7 +868,12 @@ def get_foreground_game_window_rect(aliases_path: Path) -> dict | None:
     match = _match_foreground_window(aliases_path)
     if match is None:
         return None
-    hwnd, _ = match
+    return _window_bounds(match[0])
+
+
+def _window_bounds(hwnd) -> dict | None:
+    """`{"left", "top", "width", "height"}` of `hwnd` (DWM visual bounds, see
+    get_foreground_game_window_rect), or None."""
     try:
         _ensure_dpi_aware()
         import ctypes

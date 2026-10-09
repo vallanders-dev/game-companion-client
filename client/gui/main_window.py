@@ -1,11 +1,11 @@
-"""client/gui/main_window.py — Parça's desktop window (stage 1, 2026-09-29).
+"""client/gui/main_window.py — Ombri's desktop window (stage 1, 2026-09-29).
 
 Built to the approved mockup (the "Janela principal" and "Sem jogo aberto"
 screens): a dark, frameless, rounded window with its own title bar. Before a
 game is detected it shows the "Abra um jogo" view; from the first detected
 game on, the status view: the orb and its state, the connection, the game,
 questions left today, the hotkeys, the voice. Minimize and close both hide
-it to the tray - Parça keeps running.
+it to the tray - Ombri keeps running.
 
 Pure view: it never talks to the voice loop itself. ui_process.py feeds it
 (set_state, set_game, ...) and relays its buttons as commands.
@@ -196,7 +196,7 @@ class TitleBar(QWidget):
         dot.setPixmap(QPixmap.fromImage(sphere_image(28)).scaled(
             14, 14, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
         row.addWidget(dot)
-        name = _label("Parça", size=15, weight=600, heading=True)
+        name = _label("Ombri", size=15, weight=600, heading=True)
         f = name.font()
         f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.6)
         name.setFont(f)
@@ -232,7 +232,7 @@ class MainWindow(QWidget):
         super().__init__(None, Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
         ensure_fonts_loaded()
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setWindowTitle("Parça")
+        self.setWindowTitle("Ombri")
         self.setWindowIcon(QIcon(QPixmap.fromImage(sphere_image(256))))
         self.setFixedSize(WINDOW_W, WINDOW_H)
         self.setStyleSheet(QSS)
