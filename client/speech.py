@@ -46,6 +46,20 @@ def read_pcm_wav(path: Path) -> bytes:
 # ~100 ms instead of after the whole chunk that was being written.
 _WRITE_SLICE_BYTES = TTS_PCM_RATE * 2 // 10  # 100 ms of mono int16
 
+# Called with True when an AudioOut plays its first sample and with False when
+# that AudioOut is closed/interrupted (client/ducking.py lowers the game in
+# between). Set once by client.main; must be fast and never raise into audio.
+speaking_hook = None
+
+
+def _notify_speaking(started: bool) -> None:
+    hook = speaking_hook
+    if hook is not None:
+        try:
+            hook(started)
+        except Exception:  # noqa: BLE001 - ducking must never break playback
+            pass
+
 
 class AudioOut:
     """One sounddevice raw-PCM output stream (mono int16, TTS_PCM_RATE).
@@ -79,6 +93,7 @@ class AudioOut:
         self.interrupted_at: float | None = None  # perf_counter when the device was actually stopped
         self.bytes_written = 0
         self.first_write_at: float | None = None  # time.perf_counter()
+        self._spoke_ended = False
         # Filler/answer ordering state - read and written ONLY under `lock`
         # (the events themselves are thread-safe; the decision isn't).
         self.answer_started = threading.Event()
@@ -117,6 +132,7 @@ class AudioOut:
                 self._open_locked()
                 if self.first_write_at is None:
                     self.first_write_at = time.perf_counter()
+                    _notify_speaking(True)
                 piece = pcm[i:i + _WRITE_SLICE_BYTES]
                 self._stream.write(piece)
                 self.bytes_written += len(piece)
@@ -142,16 +158,18 @@ class AudioOut:
 
     def _teardown_locked(self, abort: bool) -> None:
         st, self._stream = self._stream, None
-        if st is None:
-            return
-        try:
-            if abort:
-                st.abort()
-            else:
-                st.stop()
-            st.close()
-        except Exception:  # noqa: BLE001 - playback teardown is best-effort
-            pass
+        if st is not None:
+            try:
+                if abort:
+                    st.abort()
+                else:
+                    st.stop()  # waits for the buffered audio to finish playing
+                st.close()
+            except Exception:  # noqa: BLE001 - playback teardown is best-effort
+                pass
+        if self.first_write_at is not None and not self._spoke_ended:
+            self._spoke_ended = True
+            _notify_speaking(False)
 
 
 def play(path: Path) -> None:

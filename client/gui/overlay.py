@@ -294,6 +294,7 @@ class OverlayWindow(QWidget):
     def _reassert_topmost(self) -> None:
         if sys.platform != "win32" or not self.isVisible():
             return
+        self._apply_capture_exclusion()  # cheap when the setting didn't change
         try:
             HWND_TOPMOST = ctypes.c_void_p(-1)
             SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE, SWP_NOOWNERZORDER = 0x1, 0x2, 0x10, 0x200
@@ -429,22 +430,31 @@ class OverlayWindow(QWidget):
             self._apply_capture_exclusion()
 
     def _apply_capture_exclusion(self) -> None:
-        """The overlay must never itself appear in a screenshot sent to
-        Kimi vision (capture.capture_game_window_jpeg() crops to the game
-        window, which can overlap the overlay's own corner) or in anything
-        else that captures the screen - SetWindowDisplayAffinity with
-        WDA_EXCLUDEFROMCAPTURE (Windows 10 2004+) makes the window invisible
-        to screen/window capture while remaining normally visible on the
-        real display. One-time, same silent-failure posture as the other
-        ctypes calls here - an older Windows version just means the overlay
-        IS visible in capture, not a broken window."""
+        """Visible in recordings or not (setting "Mostrar o Ombri em gravações
+        e lives", default ON since 2026-10-13). Until then the orb always
+        used WDA_EXCLUDEFROMCAPTURE, which hid it from EVERY capture - OBS,
+        Game Bar, Discord - not just from the screenshot sent to Kimi, so
+        demos and streams couldn't show Ombri working. The Kimi screenshot is
+        now kept clean by capture.py painting Ombri's windows black
+        (`_mask_own_windows()`), whatever this setting says. Re-read on the
+        topmost timer, so a change in the settings window applies within a
+        few seconds. Silent on failure, like the other ctypes calls here."""
         if sys.platform != "win32":
             return
         try:
-            WDA_EXCLUDEFROMCAPTURE = 0x00000011
+            from client.config import load_show_in_recordings
+
+            show = load_show_in_recordings()
+        except Exception:  # noqa: BLE001
+            show = True
+        if show == getattr(self, "_shown_in_capture", None):
+            return
+        try:
+            WDA_NONE, WDA_EXCLUDEFROMCAPTURE = 0x00000000, 0x00000011
             hwnd = ctypes.c_void_p(int(self.winId()))
             user32 = ctypes.WinDLL("user32")
-            user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)
+            user32.SetWindowDisplayAffinity(hwnd, WDA_NONE if show else WDA_EXCLUDEFROMCAPTURE)
+            self._shown_in_capture = show
         except (OSError, AttributeError, ValueError):
             pass
 

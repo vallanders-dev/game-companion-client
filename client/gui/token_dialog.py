@@ -30,11 +30,14 @@ import threading
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout,
+    QApplication, QCheckBox, QComboBox, QDialog, QSlider, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout,
 )
 
 from client import capture, voices
-from client.config import USER_SETTINGS_PATH, load_client_settings, load_saved_token, save_user_settings
+from client.config import (
+    USER_SETTINGS_PATH, load_client_settings, load_duck_settings, load_saved_token, load_show_in_recordings,
+    save_user_settings,
+)
 from client.gui.fonts import body_font, ensure_fonts_loaded, heading_font
 from client.gui.theme import DARK_THEME as T
 from client.net import AuthError, ServerError, ServerSession
@@ -67,6 +70,11 @@ UI = {
         "remembered_none": "nenhum",
         "forget": "Esquecer",
         "forgotten": "Esquecidos. Da próxima vez que um desses jogos abrir, o Ombri pergunta o nome de novo.",
+        "duck": "Volume do jogo",
+        "duck_on": "Abaixar o jogo quando eu falo",
+        "duck_level": "O jogo fica em {n}% enquanto eu falo",
+        "rec": "Gravações",
+        "rec_on": "Aparecer nas gravações e lives (OBS, Discord)",
     },
     "en": {
         "title": "Ombri — beta access",
@@ -93,6 +101,11 @@ UI = {
         "remembered_none": "none",
         "forget": "Forget",
         "forgotten": "Forgotten. Next time one of those games opens, Ombri asks for its name again.",
+        "duck": "Game volume",
+        "duck_on": "Lower the game while I talk",
+        "duck_level": "The game plays at {n}% while I talk",
+        "rec": "Recordings",
+        "rec_on": "Show me in recordings and streams (OBS, Discord)",
     },
 }
 
@@ -114,6 +127,15 @@ QPushButton {{
 }}
 QPushButton#primary {{ background: {T.accent}; color: #14161C; }}
 QPushButton:disabled {{ background: #2A2E38; color: {T.text_muted}; }}
+QCheckBox {{ color: {T.text_primary}; spacing: 8px; }}
+QCheckBox::indicator {{ width: 16px; height: 16px; border-radius: 4px; border: 1px solid #2A2E38; background: #1D2028; }}
+QCheckBox::indicator:checked {{ background: {T.accent}; border: 1px solid {T.accent}; }}
+QSlider::groove:horizontal {{ height: 4px; background: #2A2E38; border-radius: 2px; }}
+QSlider::sub-page:horizontal {{ background: {T.accent}; border-radius: 2px; }}
+QSlider::handle:horizontal {{ background: {T.text_primary}; width: 14px; margin: -6px 0; border-radius: 7px; }}
+QSlider::sub-page:horizontal:disabled {{ background: #3A3F4B; }}
+QSlider::handle:horizontal:disabled {{ background: #4A4F5B; }}
+QLabel:disabled {{ color: {T.text_muted}; }}
 """
 
 
@@ -179,6 +201,25 @@ class TokenDialog(QDialog):
         self.remembered_info.setFont(body_font(QFont.Weight.Normal, 10))
         self.forget_btn = QPushButton()
         self.forget_btn.clicked.connect(self._forget_games)
+        # Lower the game while Ombri speaks (client/ducking.py) - settings only.
+        duck_on, duck_level = load_duck_settings()
+        self.duck_label = QLabel()
+        self.duck_label.setFont(body_font(QFont.Weight.DemiBold, 10))
+        self.duck_box = QCheckBox()
+        self.duck_box.setChecked(duck_on)
+        self.duck_box.setFont(body_font(QFont.Weight.Medium, 10.5))
+        self.duck_slider = QSlider(Qt.Orientation.Horizontal)
+        self.duck_slider.setRange(1, 8)  # 10% .. 80%, in steps of 10
+        self.duck_slider.setValue(max(1, min(8, round(duck_level * 10))))
+        self.duck_value = QLabel()
+        self.duck_value.setFont(body_font(QFont.Weight.Normal, 10))
+        self.duck_box.toggled.connect(self._duck_changed)
+        self.rec_label = QLabel()
+        self.rec_label.setFont(body_font(QFont.Weight.DemiBold, 10))
+        self.rec_box = QCheckBox()
+        self.rec_box.setChecked(load_show_in_recordings())
+        self.rec_box.setFont(body_font(QFont.Weight.Medium, 10.5))
+        self.duck_slider.valueChanged.connect(self._duck_changed)
         for w in (self.language_box, self.voice_box, self.field):
             w.setFont(body_font(QFont.Weight.Medium, 10.5))
 
@@ -210,6 +251,12 @@ class TokenDialog(QDialog):
             grid.addWidget(self.remembered_label, 3, 0)
             grid.addWidget(self.remembered_info, 3, 1)
             grid.addWidget(self.forget_btn, 3, 2)
+            grid.addWidget(self.duck_label, 4, 0)
+            grid.addWidget(self.duck_box, 4, 1, 1, 2)
+            grid.addWidget(self.duck_slider, 5, 1, 1, 2)
+            grid.addWidget(self.duck_value, 6, 1, 1, 2)
+            grid.addWidget(self.rec_label, 7, 0)
+            grid.addWidget(self.rec_box, 7, 1, 1, 2)
         grid.setColumnStretch(1, 1)
 
         buttons = QHBoxLayout()
@@ -262,6 +309,23 @@ class TokenDialog(QDialog):
         n = capture.remembered_count()
         self.remembered_info.setText(self._s("remembered_count", n=n) if n else self._s("remembered_none"))
         self.forget_btn.setEnabled(n > 0)
+        self.duck_label.setText(self._s("duck"))
+        self.duck_box.setText(self._s("duck_on"))
+        self.rec_label.setText(self._s("rec"))
+        self.rec_box.setText(self._s("rec_on"))
+        self._duck_changed()
+
+    def _duck_changed(self, *_args) -> None:
+        on = self.duck_box.isChecked()
+        self.duck_slider.setEnabled(on)
+        self.duck_value.setEnabled(on)
+        self.duck_value.setText(self._s("duck_level", n=self.duck_slider.value() * 10))
+
+    def _duck_fields(self) -> dict:
+        if self.reason != "settings":
+            return {}
+        return {"duck_game": self.duck_box.isChecked(), "duck_level": self.duck_slider.value() / 10,
+                "show_in_recordings": self.rec_box.isChecked()}
 
     def _forget_games(self) -> None:
         capture.forget_remembered_games()
@@ -301,7 +365,7 @@ class TokenDialog(QDialog):
         token = clean_token(self.field.text())
         if not token and self.reason == "settings" and self.saved_token:
             # Only language/voice changed: nothing to check with the server.
-            save_user_settings(voice=self.selected_voice())
+            save_user_settings(voice=self.selected_voice(), **self._duck_fields())
             self._set_status(self._s("saved"), T.states.listening)
             QTimer.singleShot(900, self.accept)
             return
@@ -338,7 +402,7 @@ class TokenDialog(QDialog):
         self._result = None
         self._worker = None
         if kind == "ok":
-            save_user_settings(token=self._pending_token, voice=self.selected_voice())
+            save_user_settings(token=self._pending_token, voice=self.selected_voice(), **self._duck_fields())
             self._set_status(self._s("connected", name=name), T.states.listening)
             QTimer.singleShot(900, self.accept)
             return

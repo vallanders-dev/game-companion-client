@@ -51,6 +51,7 @@ import threading
 import time
 import uuid
 
+from client import capture
 from client.capture import (
     GAME_CHANGED,
     HotkeyManager,
@@ -746,6 +747,9 @@ def _start_ui(settings) -> None:
     _UI.close()
     _UI = HudClient(settings.overlay_enabled, log_path=ROOT / "output" / "overlay.log",
                     on_command=_on_ui_command)
+    capture.OWN_WINDOW_PIDS.clear()
+    if _UI.pid:
+        capture.OWN_WINDOW_PIDS.add(_UI.pid)  # its windows are blacked out of screenshots sent to Kimi
     _UI.connection("connecting")
     from client.updater import INSTALL_MARKER
 
@@ -760,6 +764,29 @@ def _start_ui(settings) -> None:
             pass
 
 
+_DUCKER = None
+
+
+def _start_ducking() -> None:
+    """Lower the game while Ombri speaks (client/ducking.py). Any failure
+    (no pycaw, no COM) just means the game keeps its volume."""
+    global _DUCKER
+    try:
+        from client import speech as client_speech
+        from client.ducking import GameDucker
+
+        _DUCKER = GameDucker()
+        _DUCKER.restore_leftover()  # a game left quiet by a crash gets its volume back
+        client_speech.speaking_hook = _DUCKER.speaking
+    except Exception as exc:  # noqa: BLE001
+        print(f"(sem abaixar o jogo: {exc})")
+
+
+def _restore_game_volume() -> None:
+    if _DUCKER is not None:
+        _DUCKER.restore_now()
+
+
 def _on_ui_command(cmd: str) -> None:
     """A button in the UI process (tray menu, main window, notice). Runs on
     HudClient's reader thread."""
@@ -767,6 +794,7 @@ def _on_ui_command(cmd: str) -> None:
         print(t("bye"))
         if _SESSION is not None:
             _SESSION.close()
+        _restore_game_volume()
         _UI.close()
         os._exit(0)  # same abrupt exit Ctrl+C was; the voice loop has no gentler cancellation point
     elif cmd in ("pause", "resume"):
@@ -801,6 +829,7 @@ def _restart_for_update() -> None:
         return
     if _SESSION is not None:
         _SESSION.close()
+    _restore_game_volume()
     _UI.close()
     os._exit(0)
 
@@ -868,6 +897,7 @@ def _relaunch_as_admin() -> None:
     if ok > 32:  # <= 32 is an error, including the user saying no to the prompt
         if _SESSION is not None:
             _SESSION.close()
+        _restore_game_volume()
         _UI.close()
         os._exit(0)
 
@@ -1010,6 +1040,7 @@ def main(argv: list[str] | None = None) -> int:
         play_line("already_running", _voice, fallback_tone=False)
         return 1
     _tidy_shortcuts()
+    _start_ducking()
     try:
         return cmd_ask(args)
     except KeyboardInterrupt:

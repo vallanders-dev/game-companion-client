@@ -118,9 +118,11 @@ def capture_screenshot_jpeg(max_width: int = _MAX_WIDTH, region: dict | None = N
 
     with mss.mss() as sct:
         # monitors[0] is the whole virtual desktop; [1] is the primary monitor.
-        raw = sct.grab(region if region is not None else sct.monitors[1])
+        area = region if region is not None else sct.monitors[1]
+        raw = sct.grab(area)
 
     img = Image.frombytes("RGB", raw.size, raw.rgb)
+    _mask_own_windows(img, area)
     if img.width > max_width:
         height = round(img.height * max_width / img.width)
         resample = getattr(Image, "Resampling", Image).LANCZOS
@@ -129,6 +131,68 @@ def capture_screenshot_jpeg(max_width: int = _MAX_WIDTH, region: dict | None = N
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=_JPEG_QUALITY, optimize=True)
     return buf.getvalue()
+
+
+# Ombri's own windows (the orb, the status window, notices) are blacked out of
+# every screenshot sent to Kimi. Until 2026-10-13 the orb hid itself from ALL
+# capture (WDA_EXCLUDEFROMCAPTURE), which also hid it from OBS, Game Bar and
+# Discord - demos and streams couldn't show Ombri working. Now it's visible
+# in recordings (setting, default on) and our own screenshot paints the same
+# black patch the exclusion used to leave, at capture time (no stale
+# position, no flicker on stream). client.main adds the UI process's pid.
+OWN_WINDOW_PIDS: set[int] = set()
+
+
+def own_window_rects() -> list[dict]:
+    """Screen rects of every visible, non-minimized top-level window of
+    Ombri's own processes."""
+    pids = OWN_WINDOW_PIDS | {os.getpid()}
+    try:  # a venv's pythonw.exe is a launcher: the real UI interpreter is its child
+        import psutil
+
+        for pid in list(pids):
+            try:
+                pids |= {c.pid for c in psutil.Process(pid).children(recursive=True)}
+            except psutil.Error:
+                pass
+    except ImportError:
+        pass
+    rects: list[dict] = []
+    try:
+        import win32gui
+        import win32process
+
+        def visit(hwnd, _):
+            if win32gui.IsWindowVisible(hwnd) and not win32gui.IsIconic(hwnd):
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                if pid in pids:
+                    r = _window_bounds(hwnd)
+                    if r:
+                        rects.append(r)
+            return True
+
+        win32gui.EnumWindows(visit, None)
+    except Exception:  # noqa: BLE001 - no pywin32: nothing to mask
+        pass
+    return rects
+
+
+def _mask_own_windows(img, area: dict, rects: list[dict] | None = None) -> int:
+    """Paint each of Ombri's windows overlapping `area` black, in place.
+    Returns how many were painted."""
+    from PIL import ImageDraw
+
+    rects = own_window_rects() if rects is None else rects
+    draw, n = None, 0
+    for r in rects:
+        x0, y0 = r["left"] - area["left"], r["top"] - area["top"]
+        x1, y1 = x0 + r["width"], y0 + r["height"]
+        if x1 <= 0 or y1 <= 0 or x0 >= img.width or y0 >= img.height:
+            continue
+        draw = draw or ImageDraw.Draw(img)
+        draw.rectangle([max(0, x0), max(0, y0), min(img.width, x1) - 1, min(img.height, y1) - 1], fill=(0, 0, 0))
+        n += 1
+    return n
 
 
 # --------------------------------------------------------------------------- #

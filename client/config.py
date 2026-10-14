@@ -181,6 +181,29 @@ def load_saved_voice() -> str:
     return voices.get(os.environ.get("VOICE", "").strip() or _read_user_settings().get("voice")).key
 
 
+DEFAULT_DUCK_LEVEL = 0.3  # the game at 30% of its own volume while Ombri speaks
+
+
+def load_duck_settings() -> tuple[bool, float]:
+    """(enabled, level) for client/ducking.py, read fresh each time so a
+    change in the settings window applies to the next answer. DUCK_GAME=false
+    in client/.env turns it off."""
+    data = _read_user_settings()
+    if os.environ.get("DUCK_GAME", "").strip().lower() in ("0", "false", "no", "off"):
+        return False, DEFAULT_DUCK_LEVEL
+    try:
+        level = float(data.get("duck_level", DEFAULT_DUCK_LEVEL))
+    except (TypeError, ValueError):
+        level = DEFAULT_DUCK_LEVEL
+    return bool(data.get("duck_game", True)), min(0.9, max(0.05, level))
+
+
+def load_show_in_recordings() -> bool:
+    """Whether the in-game orb shows up in OBS / Game Bar / Discord captures
+    (client/gui/overlay.py). Default on: demos and streams should show Ombri."""
+    return bool(_read_user_settings().get("show_in_recordings", True))
+
+
 def save_user_settings(**fields) -> None:
     """Merges `fields` into %APPDATA%/Parca/settings.json (token, voice)."""
     USER_SETTINGS_DIR.mkdir(parents=True, exist_ok=True)

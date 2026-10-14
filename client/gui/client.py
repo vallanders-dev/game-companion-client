@@ -57,6 +57,12 @@ class HudClient:
         threading.Thread(target=self._writer, name="hud-writer", daemon=True).start()
         threading.Thread(target=self._reader, name="hud-reader", daemon=True).start()
 
+    @property
+    def pid(self) -> int | None:
+        """The UI process's pid while it runs (capture.py masks its windows)."""
+        proc = getattr(self, "_proc", None)
+        return proc.pid if self.enabled and proc is not None else None
+
     def _reader(self) -> None:
         for raw in self._proc.stdout:
             try:
