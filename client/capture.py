@@ -163,6 +163,32 @@ def read_new_hotkey() -> str:
     return normalize_hotkey(kb.read_hotkey())
 
 
+# Hotkey self-heal (2026-10-13). On 2026-10-09 F8/F6 (and Wispr Flow's keys)
+# went dead in GTA V Enhanced although the game was NOT elevated, while a
+# fresh process's hook AND a GetAsyncKeyState poll both saw every press
+# (tools/hotkey_isolation_test.py); restarting fixed it. Likely Windows
+# silently removing a low-level hook that answered too slowly while the game
+# loaded (LowLevelHooksTimeout) - unproven. So a single-key hotkey also has a
+# poller (gui.global_keys.AsyncKeyPoller, no hook to lose) watching the same
+# key: if the poller sees a press the hook didn't report within
+# HOOK_GRACE_SECONDS, the press still counts (that much late) and from then on
+# the poller fires at once, until the hook reports a press again. Either
+# source firing within DEDUPE_SECONDS of the other is the same press.
+HOOK_GRACE_SECONDS = 0.25
+DEDUPE_SECONDS = 0.4
+POLL_SECONDS = 0.02
+
+
+def _default_poller(key: str):
+    try:
+        from client.gui.global_keys import VK_CODES, AsyncKeyPoller
+    except Exception:  # noqa: BLE001
+        return None
+    if sys.platform != "win32" or key not in VK_CODES:
+        return None  # combos ("ctrl+shift+f8") stay hook-only
+    return AsyncKeyPoller(key)
+
+
 class HotkeyManager:
     """Owns the currently-registered global hotkey and its 'pressed' flag.
 
@@ -170,17 +196,69 @@ class HotkeyManager:
     ``pressed()`` is always False, and only manual scene entry works.
     """
 
-    def __init__(self, hotkey: str) -> None:
+    def __init__(self, hotkey: str, poller_factory: Callable | None = None) -> None:
         self._kb = _keyboard()
         self.available = self._kb is not None
         self._event = threading.Event()
         self._handle = None
         self._hotkey = normalize_hotkey(hotkey)
+        self._lock = threading.Lock()
+        self._last_fire = float("-inf")  # when the last accepted press happened, any source
+        self._last_hook = float("-inf")
+        self.hook_lost = False
+        self._poller_factory = poller_factory or _default_poller
+        self._stop = threading.Event()
         if self._kb is not None:
             try:
-                self._handle = self._kb.add_hotkey(self._hotkey, self._event.set)
+                self._handle = self._kb.add_hotkey(self._hotkey, self._on_hook)
             except Exception as exc:  # noqa: BLE001
                 print(f"  (não consegui registrar o hotkey '{self._hotkey}': {exc})")
+        self._watching = False
+        if self._handle is not None:
+            self._start_watch()
+
+    def _start_watch(self) -> None:
+        if not self._watching:
+            self._watching = True
+            threading.Thread(target=self._watch, name="hotkey-watch", daemon=True).start()
+
+    def _accept(self, at: float) -> None:
+        """Called with the lock held: count the press made at `at` (when the
+        key went down, not when it was noticed) unless it's a duplicate."""
+        if at - self._last_fire >= DEDUPE_SECONDS:
+            self._last_fire = at
+            self._event.set()
+
+    def _on_hook(self) -> None:
+        with self._lock:
+            now = self._last_hook = time.monotonic()
+            if self.hook_lost:
+                self.hook_lost = False
+                print(f"  (teclado: o atalho {self._hotkey} voltou a responder normalmente)", flush=True)
+            self._accept(now)
+
+    def _watch(self) -> None:
+        key, poller = None, None
+        while not self._stop.wait(POLL_SECONDS):
+            if key != self._hotkey:  # first run, or after try_rebind()
+                key = self._hotkey
+                poller = self._poller_factory(key)
+            if poller is None or not poller.pressed():
+                continue
+            edge = time.monotonic()
+            if not self.hook_lost:
+                self._stop.wait(HOOK_GRACE_SECONDS)
+                with self._lock:
+                    if self._last_hook >= edge - HOOK_GRACE_SECONDS:
+                        continue  # the hook saw it: all good
+                    self.hook_lost = True
+                print(f"  (teclado: o atalho {self._hotkey} parou de chegar pelo hook; "
+                      "lendo a tecla direto)", flush=True)
+            with self._lock:
+                self._accept(edge)
+
+    def stop(self) -> None:
+        self._stop.set()
 
     @property
     def hotkey(self) -> str:
@@ -201,7 +279,7 @@ class HotkeyManager:
         if self._kb is None:
             return False, "a biblioteca 'keyboard' não está disponível"
         try:
-            new_handle = self._kb.add_hotkey(combo, self._event.set)
+            new_handle = self._kb.add_hotkey(combo, self._on_hook)
         except Exception as exc:  # noqa: BLE001
             return False, str(exc)
         if self._handle is not None:
@@ -211,6 +289,7 @@ class HotkeyManager:
                 pass
         self._handle = new_handle
         self._hotkey = combo
+        self._start_watch()
         return True, ""
 
 
