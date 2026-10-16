@@ -191,6 +191,19 @@ def preload_vad_model() -> bool:
         return False
 
 
+# End-of-turn checks (client/turn_detect.py): seconds of silence at which the
+# take so far is offered to the model; the fixed `silence_hang` (2.5 s) still
+# ends a take the model never calls finished. Measured on the owner's real
+# questions (Witcher session, real pauses from Scribe's word timings): asked at
+# 0.3 s the model stopped 19 of 45 mid-sentence pauses early ("No, <pause> there's
+# a gate..."); at 0.7 s with takes >= 1 s, 2 of 9, and 15 of 27 questions still end
+# early. Shorter takes are never cut: a lone "No," / "Exactly." is usually an opener.
+SMART_TURN_CHECKS = (0.7, 1.2)
+SMART_TURN_MIN_TAKE = 1.0  # seconds of audio before the model is asked at all
+SMART_TURN_THRESHOLD = 0.85  # = turn_detect.THRESHOLD, see there
+LAST_STOP_SECONDS: float | None = None  # elapsed audio when the last take stopped (tests/telemetry)
+
+
 def record_until_silence(
     *,
     silence_hang: float = 2.5,
@@ -199,8 +212,18 @@ def record_until_silence(
     vad_threshold: float = 0.5,
     speech_pad_ms: float = 30.0,
     no_speech_timeout: float = 4.0,
+    start_tone: bool = True,
+    abort=None,
+    min_speech_onset: float = 0.0,
+    smart_turn: bool = True,
 ) -> bytes | None:
     """Record the mic until it goes quiet, then return WAV bytes.
+
+    The follow-up window (client/main.py) records with ``start_tone=False``
+    (no beep after every answer), ``abort`` (a callable polled every block;
+    True ends the recording at once with ``None`` - a key was pressed) and
+    ``min_speech_onset`` (seconds of speech blocks needed before the take
+    counts as speech, so a cough or a game sound doesn't open a paid turn).
 
     Each ~32 ms block is classified by Silero VAD as speech or silence
     (``vad_threshold`` on its speech-probability output, default matches
@@ -216,6 +239,11 @@ def record_until_silence(
     tail-padding mechanism (there used to be a separate fixed-buffer trim
     here too; see README "Why Silero VAD replaced RMS thresholding" for why
     that was retired rather than kept alongside this).
+
+    ``smart_turn`` (0.1.18): at the short pauses in SMART_TURN_CHECKS the take
+    so far goes to the end-of-turn model (client/turn_detect.py); "finished"
+    stops the recording right there instead of after ``silence_hang``. No model
+    (not downloaded yet, failed) = the fixed wait, exactly as before.
 
     Returns ``None`` (caller should fall back to typed input) when there is no
     usable input device, the stream errors, Silero VAD can't be loaded, or
@@ -254,6 +282,11 @@ def record_until_silence(
     last_speech_end_sample = 0
     speech_detected = False
     stop_reason = "erro"
+    turn_model = None
+    if smart_turn:
+        from client import turn_detect
+        turn_model = turn_detect.get_model()
+    next_check = 0  # index into SMART_TURN_CHECKS; back to 0 whenever speech resumes
 
     try:
         with stream:
@@ -267,8 +300,10 @@ def record_until_silence(
             # the background) so it never delays the recording loop below.
             # Same for both the ask-hotkey and remember-hotkey, since both
             # call this one function.
-            _play_tone(_START_TONE_HZ)
-            print("  🎙️ Escutando...")
+            if start_tone:
+                _play_tone(_START_TONE_HZ)
+                print("  🎙️ Escutando...")
+            speech_time = 0.0
             while True:
                 try:
                     data, _overflow = stream.read(blocksize)
@@ -282,18 +317,39 @@ def record_until_silence(
                 elapsed += _BLOCK_SECONDS
                 elapsed_samples += len(mono)
 
+                if abort is not None and abort():
+                    return None
+
                 prob = vad_model(mono)
 
                 if prob >= vad_threshold:
-                    speech_detected = True
+                    speech_time += _BLOCK_SECONDS
+                    speech_detected = speech_detected or speech_time >= min_speech_onset
                     silence_run = 0.0
                     last_speech_end_sample = elapsed_samples
+                    next_check = 0
                 else:
                     silence_run += _BLOCK_SECONDS
 
-                if not speech_detected and elapsed >= no_speech_timeout:
-                    print(f"  (nada falado em {elapsed:.1f}s)")
+                # Not while speech is still building toward the onset: a
+                # sentence started just before the timeout isn't cut off.
+                if not speech_detected and elapsed >= no_speech_timeout and (
+                        speech_time == 0.0 or silence_run >= 0.5):
+                    if start_tone:
+                        print(f"  (nada falado em {elapsed:.1f}s)")
                     return None
+                if (turn_model is not None and speech_detected
+                        and elapsed >= max(min_duration, SMART_TURN_MIN_TAKE + silence_run)
+                        and next_check < len(SMART_TURN_CHECKS)
+                        and silence_run >= SMART_TURN_CHECKS[next_check]):
+                    next_check += 1
+                    try:
+                        p_done = turn_model.probability(np.concatenate(blocks))
+                    except Exception:  # noqa: BLE001 - a model error = the fixed wait
+                        p_done, turn_model = 0.0, None
+                    if p_done >= SMART_TURN_THRESHOLD:
+                        stop_reason = f"fim de fala ({silence_run:.1f}s, p={p_done:.2f})"
+                        break
                 if (
                     speech_detected
                     and elapsed >= min_duration
@@ -311,6 +367,8 @@ def record_until_silence(
     # Always visible, regardless of outcome: this is the fastest way to tell
     # "the mic cut me off early" (short elapsed, stopped by silence) from
     # "I never got heard at all" from a genuinely long, complete take.
+    global LAST_STOP_SECONDS
+    LAST_STOP_SECONDS = round(elapsed, 2)
     print(f"  (gravação: {elapsed:.1f}s, parou por {stop_reason})")
     if not blocks or not speech_detected:
         return None

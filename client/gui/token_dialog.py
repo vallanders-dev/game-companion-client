@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
 
 from client import capture, voices
 from client.config import (
-    USER_SETTINGS_PATH, load_client_settings, load_duck_settings, load_saved_token, load_show_in_recordings,
+    USER_SETTINGS_PATH, load_client_settings, load_duck_settings, load_follow_up_seconds, load_saved_token, load_voice_commands, load_show_in_recordings,
     save_user_settings,
 )
 from client.gui.fonts import body_font, ensure_fonts_loaded, heading_font
@@ -75,6 +75,10 @@ UI = {
         "duck_level": "O jogo fica em {n}% enquanto eu falo",
         "rec": "Gravações",
         "rec_on": "Aparecer nas gravações e lives (OBS, Discord)",
+        "follow": "Conversa",
+        "follow_on": "Continuar ouvindo depois que eu respondo",
+        "vcmd": "Comandos de voz",
+        "vcmd_on": "Ouvir \"Ei, Ombri\" e \"chega\" (tudo no seu PC)",
     },
     "en": {
         "title": "Ombri — beta access",
@@ -106,6 +110,10 @@ UI = {
         "duck_level": "The game plays at {n}% while I talk",
         "rec": "Recordings",
         "rec_on": "Show me in recordings and streams (OBS, Discord)",
+        "follow": "Conversation",
+        "follow_on": "Keep listening after I answer",
+        "vcmd": "Voice commands",
+        "vcmd_on": "Listen for \"Hey Ombri\" and \"stop\" (all on your PC)",
     },
 }
 
@@ -219,6 +227,18 @@ class TokenDialog(QDialog):
         self.rec_box = QCheckBox()
         self.rec_box.setChecked(load_show_in_recordings())
         self.rec_box.setFont(body_font(QFont.Weight.Medium, 10.5))
+        # The follow-up window (client/main.py) - settings only.
+        self.follow_label = QLabel()
+        self.follow_label.setFont(body_font(QFont.Weight.DemiBold, 10))
+        self.follow_box = QCheckBox()
+        self.follow_box.setChecked(load_follow_up_seconds() > 0)
+        self.follow_box.setFont(body_font(QFont.Weight.Medium, 10.5))
+        # "Ei, Ombri" / "chega" (client/voice_commands.py) - opt-in, settings only.
+        self.vcmd_label = QLabel()
+        self.vcmd_label.setFont(body_font(QFont.Weight.DemiBold, 10))
+        self.voice_cmd_box = QCheckBox()
+        self.voice_cmd_box.setChecked(load_voice_commands())
+        self.voice_cmd_box.setFont(body_font(QFont.Weight.Medium, 10.5))
         self.duck_slider.valueChanged.connect(self._duck_changed)
         for w in (self.language_box, self.voice_box, self.field):
             w.setFont(body_font(QFont.Weight.Medium, 10.5))
@@ -257,6 +277,10 @@ class TokenDialog(QDialog):
             grid.addWidget(self.duck_value, 6, 1, 1, 2)
             grid.addWidget(self.rec_label, 7, 0)
             grid.addWidget(self.rec_box, 7, 1, 1, 2)
+            grid.addWidget(self.follow_label, 8, 0)
+            grid.addWidget(self.follow_box, 8, 1, 1, 2)
+            grid.addWidget(self.vcmd_label, 9, 0)
+            grid.addWidget(self.voice_cmd_box, 9, 1, 1, 2)
         grid.setColumnStretch(1, 1)
 
         buttons = QHBoxLayout()
@@ -313,6 +337,10 @@ class TokenDialog(QDialog):
         self.duck_box.setText(self._s("duck_on"))
         self.rec_label.setText(self._s("rec"))
         self.rec_box.setText(self._s("rec_on"))
+        self.follow_label.setText(self._s("follow"))
+        self.follow_box.setText(self._s("follow_on"))
+        self.vcmd_label.setText(self._s("vcmd"))
+        self.voice_cmd_box.setText(self._s("vcmd_on"))
         self._duck_changed()
 
     def _duck_changed(self, *_args) -> None:
@@ -325,7 +353,8 @@ class TokenDialog(QDialog):
         if self.reason != "settings":
             return {}
         return {"duck_game": self.duck_box.isChecked(), "duck_level": self.duck_slider.value() / 10,
-                "show_in_recordings": self.rec_box.isChecked()}
+                "show_in_recordings": self.rec_box.isChecked(), "follow_up": self.follow_box.isChecked(),
+                "voice_commands": self.voice_cmd_box.isChecked()}
 
     def _forget_games(self) -> None:
         capture.forget_remembered_games()

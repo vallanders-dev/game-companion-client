@@ -16,3 +16,6 @@ playsound3>=3.0.0
 websockets>=13.0
 # Lowers the game's own volume while Ombri speaks (client/ducking.py).
 pycaw>=20240316
+# "Ei, Ombri" / "chega" (client/voice_commands.py, opt-in): local keyword spotting.
+# Models (Apache-2.0) download on first use into %LOCALAPPDATA%/Parca/models.
+vosk==0.3.45

@@ -29,10 +29,12 @@ ROOT = Path(__file__).resolve().parents[2]  # client/gui/client.py -> repo root
 
 
 class HudClient:
-    def __init__(self, enabled: bool, log_path: Path | None = None, on_command=None) -> None:
+    def __init__(self, enabled: bool, log_path: Path | None = None, on_command=None,
+                 start_in_tray: bool = False) -> None:
         """`on_command(name)` is called, on a reader thread, for each command
         the UI sends back ("quit", "pause", "resume", "settings",
-        "relaunch_admin")."""
+        "relaunch_admin"). `start_in_tray`: don't open the main window at
+        start (a relaunch while the game is in front)."""
         self.enabled = False
         self.error: str | None = None
         self._queue: queue.Queue = queue.Queue()
@@ -47,7 +49,7 @@ class HudClient:
                 log = subprocess.DEVNULL
             flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0  # Ctrl+C stays main.py's
             self._proc = subprocess.Popen(
-                [sys.executable, "-m", "client.gui.ui_process"],
+                [sys.executable, "-m", "client.gui.ui_process"] + (["--tray"] if start_in_tray else []),
                 cwd=ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log, creationflags=flags,
             )
         except OSError as exc:

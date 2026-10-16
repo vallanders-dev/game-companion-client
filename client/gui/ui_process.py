@@ -224,8 +224,9 @@ class TrayHeader(QWidget):
 
 
 class Ui:
-    def __init__(self, app: QApplication) -> None:
+    def __init__(self, app: QApplication, start_in_tray: bool = False) -> None:
         self.app = app
+        self.start_in_tray = start_in_tray
         self.window = MainWindow()
         self.overlay = OverlayWindow(theme=DARK_THEME)
         self.notice = Notice()
@@ -266,7 +267,11 @@ class Ui:
         self.tray.activated.connect(self._tray_click)
         self.tray.show()
         self._texts()
-        self.window.show_and_raise()
+        if not self.start_in_tray:
+            # Not after "Reabrir como admin" (--tray): the game is in front then,
+            # and raising this window took its focus - live 2026-10-16, the left
+            # mouse button went dead in Witcher 3 (hotkeys don't need focus).
+            self.window.show_and_raise()
 
     # ------------------------------------------------------------------ helpers
     def _texts(self) -> None:
@@ -373,7 +378,7 @@ def main() -> None:
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)  # hiding the window to the tray must not end the UI
     ensure_fonts_loaded()
-    ui_state = Ui(app)
+    ui_state = Ui(app, start_in_tray="--tray" in sys.argv[1:])
     bridge = _Bridge()
     bridge.message.connect(ui_state.handle)
     # exit(), not quit(): Qt 6's quit() first asks every window to close,

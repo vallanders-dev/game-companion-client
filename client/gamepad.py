@@ -28,6 +28,20 @@ import time
 DEFAULT_COMBO = "back+leftshoulder"  # see README for why
 _POLL_SECONDS = 0.05
 _RESCAN_SECONDS = 1.0  # how often to check for a (re)plugged controller
+_ACTIVE_AXIS = 0.5  # a stick pushed past half counts as "in use" (drift stays far below)
+CONTROLLER_RECENT_SECONDS = 120.0  # a controller used this recently is what the player plays with
+
+
+def controller_family(name: str) -> str:
+    """SDL's controller name -> the server's controller kinds."""
+    n = name.lower()
+    if "xbox" in n or "xinput" in n:  # first: "Xbox Wireless Controller"
+        return "xbox"
+    if any(k in n for k in ("dualsense", "dualshock", "playstation", "ps4", "ps5", "wireless controller")):
+        return "playstation"  # Sony pads report as "PS4/PS5 Controller" or "Wireless Controller"
+    if any(k in n for k in ("switch", "nintendo", "joy-con", "pro controller")):
+        return "switch"
+    return "controller"
 
 # SDL_GameController button names -> pygame's CONTROLLER_BUTTON_* constant
 # names. Populated lazily once pygame is importable (avoids importing pygame
@@ -87,6 +101,7 @@ class GamepadWatcher:
         self.combo = normalize_combo(combo) or normalize_combo(DEFAULT_COMBO)
         self.available = False
         self.controller_name = ""
+        self.last_activity = 0.0  # time.monotonic() of the last button press / stick move
         self._event = threading.Event()
         self._stop = threading.Event()
         self._pygame = None
@@ -147,6 +162,12 @@ class GamepadWatcher:
                         joystick = pygame.joystick.Joystick(0)
                         self.controller_name = joystick.get_name() or "controle"
 
+                if joystick is not None and (
+                        any(joystick.get_button(b) for b in range(joystick.get_numbuttons()))
+                        or any(abs(joystick.get_axis(a)) > _ACTIVE_AXIS
+                               for a in range(min(joystick.get_numaxes(), 4)))):
+                    self.last_activity = now  # sticks only (axes 0-3); triggers rest at -1 on some pads
+
                 if joystick is not None and self._button_ids:
                     n = joystick.get_numbuttons()
                     held = all(
@@ -160,6 +181,18 @@ class GamepadWatcher:
                 self.controller_name = ""
 
             time.sleep(_POLL_SECONDS)
+
+    def input_kind(self, from_pad: bool = False) -> str:
+        """What the player plays with right now, for the answer prompts
+        (2026-10-16: "what key draws my sword?" got a controller-agnostic
+        answer). A controller counts when it's connected AND was the trigger
+        or was used in the last CONTROLLER_RECENT_SECONDS; otherwise the
+        keyboard. Server values: keyboard / xbox / playstation / switch /
+        controller."""
+        recent = time.monotonic() - self.last_activity < CONTROLLER_RECENT_SECONDS
+        if not self.controller_name or not (from_pad or recent):
+            return "keyboard"
+        return controller_family(self.controller_name)
 
     def clear(self) -> None:
         self._event.clear()

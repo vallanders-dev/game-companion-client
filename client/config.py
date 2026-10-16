@@ -97,6 +97,9 @@ class ClientSettings:
     game_voice_match_min_ratio: float
     # client/voices.py key: the voice AND the conversation's language.
     voice: str = "raquel"
+    # End-of-turn model (client/turn_detect.py): stop listening when the
+    # sentence is finished instead of after mic_silence_hang. SMART_TURN=false = the fixed wait.
+    smart_turn: bool = True
 
 
 def load_user_config() -> dict:
@@ -204,6 +207,36 @@ def load_show_in_recordings() -> bool:
     return bool(_read_user_settings().get("show_in_recordings", True))
 
 
+# The follow-up window (2026-10-14): after an answer the mic stays open this
+# long, with no beep, so a follow-up needs no F8. It ends as soon as nothing
+# is said in time, a key is pressed, or the player says "valeu" (the closing
+# gate ends the conversation - no window after it).
+DEFAULT_FOLLOW_UP_SECONDS = 5.0
+
+
+def load_follow_up_seconds() -> float:
+    """Seconds the follow-up window stays open; 0 = off. Read fresh each time
+    so the settings window applies to the next answer. FOLLOW_UP_SECONDS in
+    client/.env overrides it (0 turns it off)."""
+    env = os.environ.get("FOLLOW_UP_SECONDS", "").strip()
+    if env:
+        try:
+            return max(0.0, min(15.0, float(env)))
+        except ValueError:
+            pass
+    return DEFAULT_FOLLOW_UP_SECONDS if _read_user_settings().get("follow_up", True) else 0.0
+
+
+def load_voice_commands() -> bool:
+    """"Ei, Ombri" + "chega" (client/voice_commands.py). Opt-in: the mic is
+    listened to locally the whole time Ombri runs. VOICE_COMMANDS in
+    client/.env overrides the saved setting."""
+    env = os.environ.get("VOICE_COMMANDS", "").strip().lower()
+    if env:
+        return env in ("1", "true", "yes", "on")
+    return bool(_read_user_settings().get("voice_commands", False))
+
+
 def save_user_settings(**fields) -> None:
     """Merges `fields` into %APPDATA%/Parca/settings.json (token, voice)."""
     USER_SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -248,4 +281,5 @@ def load_client_settings() -> ClientSettings:
         game_voice_match_min_ratio=_float_env(
             "GAME_VOICE_MATCH_MIN_RATIO", DEFAULT_GAME_VOICE_MATCH_MIN_RATIO
         ),
+        smart_turn=_bool_env("SMART_TURN", True),
     )

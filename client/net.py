@@ -233,6 +233,8 @@ class ServerSession:
         on_text=None,
         on_audio=None,
         on_usage=None,
+        wake: bool = False,
+        controls: str = "",
     ) -> dict:
         """One ask-turn, start to finish - blocks until `turn_result`
         arrives (or the connection breaks). `wav_bytes` is the real path
@@ -264,6 +266,10 @@ class ServerSession:
             msg["question_text"] = question_text
         if allow_spoilers is not None:
             msg["allow_spoilers"] = allow_spoilers
+        if wake:
+            msg["wake"] = True  # audio starts with "Ei, Ombri" (client/voice_commands.py)
+        if controls:
+            msg["controls"] = controls  # keyboard / xbox / playstation / switch / controller
         frames: list = [json.dumps(msg)]
         if screenshot_bytes is not None:
             frames.append(screenshot_bytes)

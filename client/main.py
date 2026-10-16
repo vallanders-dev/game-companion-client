@@ -43,6 +43,7 @@ and ``SERVER_AUTH_TOKEN`` (see ``client/.env.example`` and
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import subprocess
@@ -64,8 +65,8 @@ from client.capture import (
     resolve_spoken_game,
 )
 from client import texts, voices
-from client.config import (DEFAULT_SERVER_URL, FALLBACK_SERVER_URLS, load_client_settings, load_saved_voice,
-                           save_token)
+from client.config import (DEFAULT_SERVER_URL, FALLBACK_SERVER_URLS, load_client_settings, load_follow_up_seconds,
+                           load_saved_voice, load_voice_commands, save_token)
 from client.fixed_audio import (
     FillerPlayer, load_fillers, load_line, mark_answer_started, play_before_answer, play_line,
 )
@@ -77,6 +78,7 @@ from client.listen import play_confirm_tone, play_stop_tone, preload_vad_model, 
 from client.net import AuthError, ServerError, ServerSession
 from client.speech import AudioOut
 from client.updater import check_for_update
+from client.voice_commands import VoiceListener
 
 _VERBOSE = True
 # The picked voice (client/voices.py key): which baked lines play, and - via
@@ -88,7 +90,12 @@ _voice = voices.DEFAULT_VOICE
 _UI = HudClient(False)
 # Set from the tray's "Pausar o Ombri": triggers are ignored until resumed.
 _PAUSED = threading.Event()
+# A --relaunched copy (admin relaunch, update restart) starts in the tray: the
+# game is usually in front, and opening the main window took its focus.
+_RELAUNCHED = False
 _SESSION: "ServerSession | None" = None
+# "Ei, Ombri" / "chega" (client/voice_commands.py): None unless the setting is on.
+_VOICE: "VoiceListener | None" = None
 
 
 def _set_voice(key: str) -> None:
@@ -122,12 +129,93 @@ def _prompt(label: str) -> str:
         return ""
 
 
+@contextlib.contextmanager
+def _mic_busy():
+    """The voice listener ignores the mic while the client records."""
+    voice = _VOICE
+    previous = voice.mode if voice is not None else None
+    if voice is not None:
+        voice.set_mode(None)
+    try:
+        yield
+    finally:
+        if voice is not None:
+            voice.set_mode(previous)
+
+
 def _record(settings) -> bytes | None:
+    with _mic_busy():
+        return _record_now(settings)
+
+
+def _record_now(settings) -> bytes | None:
     return record_until_silence(
         silence_hang=settings.mic_silence_hang, max_duration=settings.mic_max_duration,
         min_duration=settings.mic_min_duration, vad_threshold=settings.mic_vad_threshold,
         speech_pad_ms=settings.mic_speech_pad_ms, no_speech_timeout=settings.mic_no_speech_timeout,
+        smart_turn=getattr(settings, "smart_turn", True),
     )
+
+
+# The follow-up window (2026-10-14, owner-approved): after a real answer the
+# mic stays open for load_follow_up_seconds() with no beep, the orb showing
+# "ouvindo", so a follow-up ("e o outro?") needs no F8 - the server keeps the
+# conversation (server/conversation.py). Only after outcomes that answered
+# something; never after "valeu" (closing), a cap line, an interrupted answer
+# or while paused, so it can never chain on its own. A cough or a game sound
+# must pass FOLLOW_UP_MIN_SPEECH of speech and a stricter VAD threshold
+# before a paid turn starts; an F8/F6/gamepad press ends the window at once
+# and becomes the next command.
+FOLLOW_UP_OUTCOMES = ("answered", "no_notes")
+FOLLOW_UP_MIN_SPEECH = 0.35
+FOLLOW_UP_VAD_THRESHOLD = 0.6
+
+
+def _listen_for_follow_up(settings, triggers: list, seconds: float) -> tuple[bytes | None, object | None]:
+    """(WAV of a follow-up or None, a trigger pressed during the window or None)."""
+    for trigger in triggers:
+        trigger.clear()
+    fired: list = []
+
+    def key_pressed() -> bool:
+        hit = next((trigger for trigger in triggers if trigger.pressed()), None)
+        if hit is not None:
+            fired.append(hit)
+        return hit is not None
+
+    _UI.state("ouvindo")
+    with _mic_busy():
+        wav = record_until_silence(
+            silence_hang=settings.mic_silence_hang, max_duration=settings.mic_max_duration,
+            min_duration=settings.mic_min_duration,
+            vad_threshold=max(settings.mic_vad_threshold, FOLLOW_UP_VAD_THRESHOLD),
+            speech_pad_ms=settings.mic_speech_pad_ms, no_speech_timeout=seconds,
+            start_tone=False, abort=key_pressed, min_speech_onset=FOLLOW_UP_MIN_SPEECH,
+            smart_turn=getattr(settings, "smart_turn", True),
+        )
+    _UI.state("pensando" if wav else "idle")
+    return wav, (fired[0] if fired else None)
+
+
+def _sync_voice_listener(triggers: list) -> None:
+    """Starts, stops or restarts the voice listener to match the settings
+    (checked between turns, like the voice). Its two triggers live in the
+    shared trigger list, so every wait loop and the barge-in watcher see them."""
+    global _VOICE
+    wanted = load_voice_commands()
+    language = voices.get(_voice).language
+    if _VOICE is not None and (not wanted or _VOICE.language != ("en" if language == "en" else "pt")):
+        _VOICE.stop()
+        for trigger in (_VOICE.wake, _VOICE.shush):
+            if trigger in triggers:
+                triggers.remove(trigger)
+        _VOICE = None
+        telemetry("  (comandos de voz desligados)")
+    if wanted and _VOICE is None:
+        _VOICE = VoiceListener(language)
+        _VOICE.start()
+        triggers.extend([_VOICE.wake, _VOICE.shush])
+        telemetry("  (comandos de voz ligados - modelo carregando)")
 
 
 def _known_game_names(settings) -> list[str]:
@@ -247,10 +335,14 @@ class BargeInWatcher:
         self.fired_at = None
         self._cancel = cancel
         self._audio_out = audio_out
+        if _VOICE is not None:
+            _VOICE.set_mode("shush")
         self._armed.set()
 
     def disarm(self) -> None:
         self._armed.clear()
+        if _VOICE is not None:
+            _VOICE.set_mode("wake")
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -369,6 +461,9 @@ def _remember_note(session: ServerSession, settings, game: str, barge: "BargeInW
     elif outcome == "cap_reached":
         print(t("note_cap", text=texts.spoken("cap_reached")))
         return _speak_line("cap_reached", barge)
+    elif result.get("answer_text"):
+        # F6 pressed for a question: the server answered it like F8 (spoken above).
+        print(t("answer", text=result["answer_text"]))
     else:
         telemetry(f"  (resultado inesperado: {outcome})")
     return None
@@ -438,6 +533,11 @@ def cmd_ask(_args: argparse.Namespace) -> int:
         _UI.usage(*session.usage)
 
     preload_vad_model()
+    if getattr(settings, "smart_turn", True):
+        # first run downloads the 8 MB end-of-turn model in the background; until
+        # then (or without network) the fixed silence wait is used
+        from client import turn_detect
+        turn_detect.start_loading()
     manager = HotkeyManager(settings.capture_hotkey)
     remember_manager = HotkeyManager(settings.remember_hotkey)
     gamepad = GamepadWatcher(settings.gamepad_combo)
@@ -458,6 +558,7 @@ def cmd_ask(_args: argparse.Namespace) -> int:
     # and goes straight to taking a note (pending_fired carries which one).
     # The first client cut watched F8/gamepad only - F6 did nothing.
     barge = BargeInWatcher(all_triggers) if settings.barge_in else None
+    _sync_voice_listener(all_triggers)
 
     def make_fillers():
         if not settings.filler_enabled:
@@ -473,6 +574,7 @@ def cmd_ask(_args: argparse.Namespace) -> int:
 
     active_game: str | None = None
     pending_fired = None
+    follow_up_wav: bytes | None = None
 
     while True:
         # A voice (and language) picked in the settings window while this
@@ -487,6 +589,10 @@ def cmd_ask(_args: argparse.Namespace) -> int:
             fillers = make_fillers()
             print(t("voice_changed", name=voices.get(_voice).name))
             _send_ui_info(ui_keys)
+        _sync_voice_listener(all_triggers)
+        if _VOICE is not None and _VOICE.error:
+            telemetry(f"  (comandos de voz indisponíveis: {_VOICE.error})")
+            _VOICE.error = None
 
         detected = detect_game(settings.game_aliases_path)
         if detected:
@@ -529,7 +635,13 @@ def cmd_ask(_args: argparse.Namespace) -> int:
             return _voice_setting_changed() or detect_game(settings.game_aliases_path) not in (None, active_game)
 
         scene_prompt = t("scene_prompt", ask=_fmt(manager.hotkey), note=_fmt(remember_manager.hotkey))
-        if pending_fired is not None:
+        if _VOICE is not None and pending_fired is _VOICE.shush:
+            pending_fired = None  # "chega": the answer stopped, nothing else starts
+            print(t("stopped_by_voice"))
+        if follow_up_wav is not None:
+            scene, fired = "", manager  # answered like an F8 question, already recorded
+            print(t("follow_up_heard"))
+        elif pending_fired is not None:
             scene, fired = "", pending_fired
             pending_fired = None
             print(t("interrupted_note" if fired is remember_manager else "interrupted_ask"))
@@ -542,7 +654,10 @@ def cmd_ask(_args: argparse.Namespace) -> int:
         if fired is GAME_CHANGED:
             print("-" * 48)
             continue
+        if _VOICE is not None and fired is _VOICE.shush:
+            continue  # a stop word with nothing playing: nothing to stop
         if fired is not None and _PAUSED.is_set():
+            follow_up_wav = None
             continue  # paused from the tray: the key does nothing
 
         if fired is None and scene.strip().lower() == "jogo":
@@ -560,6 +675,8 @@ def cmd_ask(_args: argparse.Namespace) -> int:
             continue
 
         used_trigger = fired is not None
+        from_wake = False
+        heard_in_window = False  # this question came from the follow-up window, no key pressed
         question_text = None
         screenshot = None
         wav = None
@@ -570,10 +687,21 @@ def cmd_ask(_args: argparse.Namespace) -> int:
             except Exception as exc:  # noqa: BLE001
                 print(t("capture_failed"))
                 telemetry(f"  (captura falhou: {exc})")
-            print(t("speak_question", hang=settings.mic_silence_hang))
-            _UI.state("ouvindo")
-            wav = _record(settings)
-            _UI.state("pensando" if wav else "idle")
+            wake_audio = _VOICE.wake.take_audio() if _VOICE is not None and fired is _VOICE.wake else None
+            from_wake = wake_audio is not None
+            if fired is not None and _VOICE is not None and fired is _VOICE.wake:
+                print(t("wake_heard"))
+            if follow_up_wav is not None:
+                wav, follow_up_wav = follow_up_wav, None
+                heard_in_window = True
+            elif wake_audio is not None:
+                wav = wake_audio  # "Ei Ombri, <question>": already recorded
+                _UI.state("pensando")
+            else:
+                print(t("speak_question", hang=settings.mic_silence_hang))
+                _UI.state("ouvindo")
+                wav = _record(settings)
+                _UI.state("pensando" if wav else "idle")
             if not wav:
                 print(t("no_voice_type"))
                 question_text = _prompt(t("question_prompt"))
@@ -639,6 +767,8 @@ def cmd_ask(_args: argparse.Namespace) -> int:
         try:
             result = session.ask(
                 turn_id, game, wav_bytes=wav, question_text=question_text, screenshot_bytes=screenshot,
+                wake=from_wake,
+                controls=gamepad.input_kind(from_pad=fired is gamepad) if gamepad.available else "keyboard",
                 cancel=cancel, on_state=on_state, on_meta=on_meta, on_audio=on_audio, on_usage=_UI.usage,
             )
         except ServerError as exc:
@@ -695,7 +825,9 @@ def cmd_ask(_args: argparse.Namespace) -> int:
                 pending_fired = _speak_line("cap_reached", barge)
             elif outcome == "no_notes" and settings.remember_hotkey.lower() == NO_NOTES_BAKED_HOTKEY:
                 pending_fired = _speak_line(NO_NOTES_LINE, barge)
-            elif outcome == "closing":
+            elif outcome == "closing" and not heard_in_window:
+                # A "valeu"/"interesting" heard by the follow-up window ends
+                # the chat silently - the player was just reacting, not asking.
                 pending_fired = _speak_line(CLOSING_LINE, barge)
         timing = result.get("stats", {}).get("timing") or {}
         if timing or t_first_heard is not None:
@@ -716,6 +848,12 @@ def cmd_ask(_args: argparse.Namespace) -> int:
             # other silent reason" - found on a live pass where the tester
             # couldn't tell why a reply had no voice.
             print(t("voice_failed", error=tts_error))
+        follow_seconds = load_follow_up_seconds()
+        if (follow_seconds > 0 and pending_fired is None and outcome in FOLLOW_UP_OUTCOMES
+                and not result.get("interrupted") and not _PAUSED.is_set()):
+            follow_up_wav, pending_fired = _listen_for_follow_up(settings, all_triggers, follow_seconds)
+            if follow_up_wav is not None:
+                telemetry("  (janela de continuação: fala ouvida)")
         print("-" * 48)
 
 
@@ -746,7 +884,7 @@ def _start_ui(settings) -> None:
     global _UI
     _UI.close()
     _UI = HudClient(settings.overlay_enabled, log_path=ROOT / "output" / "overlay.log",
-                    on_command=_on_ui_command)
+                    on_command=_on_ui_command, start_in_tray=_RELAUNCHED)
     capture.OWN_WINDOW_PIDS.clear()
     if _UI.pid:
         capture.OWN_WINDOW_PIDS.add(_UI.pid)  # its windows are blacked out of screenshots sent to Kimi
@@ -1034,6 +1172,8 @@ def main(argv: list[str] | None = None) -> int:
         return subprocess.call([sys.executable, "-m", "client.main", *(argv or [])], env=env)
     # After the update step: a relaunching parent never gets here, so only
     # the copy that actually runs holds the lock.
+    global _RELAUNCHED
+    _RELAUNCHED = bool(args.relaunched)
     if not _claim_single_instance(10.0 if args.relaunched else 0.0):
         _set_voice(load_saved_voice())
         print(texts.spoken("already_running"))

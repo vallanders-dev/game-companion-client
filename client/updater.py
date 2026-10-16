@@ -7,9 +7,16 @@ and the current version keeps running.
 Where the newest version comes from (since v0.1.12, 2026-10-02): Ombri's own
 server, `UPDATE_BASE/v1/client/latest`, which also serves the release zip
 with its sha256 - checked before anything is written, so a damaged or
-swapped download is refused. Only if our server can't answer does it fall
-back to the public GitHub repo (the way v0.1.0-v0.1.11 updated). Moving off
-GitHub lets the client repo go private and the files move anywhere later.
+swapped download is refused.
+
+Signed releases (since v0.1.18, 2026-10-15): latest.json carries an Ed25519
+signature by the developer's offline key (tools/release_signing.py), checked
+against RELEASE_PUBLIC_KEY (client/sigcheck.py) before the app believes any
+version number or sha256 in it. Someone who broke into the server can no
+longer ship code to testers: an unsigned or forged latest.json is ignored,
+and a zip that doesn't match the SIGNED sha256 is refused. The GitHub
+fallback (unsigned: GitHub's release tag, no sha256) is gone for the same
+reason - if our server can't answer, the app just keeps its version.
 
   * An install made by Ombri-Setup.exe or `instalar-parca.cmd` (marked by
     INSTALL_MARKER, no git needed): if the latest release is newer, download
@@ -41,8 +48,13 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
+from client import sigcheck
+
 PUBLIC_REPO = "vallanders-dev/game-companion-client"
-RELEASES_URL = f"https://api.github.com/repos/{PUBLIC_REPO}/releases/latest"
+# The public half of the release signing key (tools/release_signing.py pubkey).
+# Changing it means every installed app stops accepting updates signed by the
+# old key - only ever change it with a release signed by the OLD key.
+RELEASE_PUBLIC_KEY = "798704273cf55aba959262fbceeb0c56fb6493002f5104a918a4e4a2afd32523"
 # Our server; PARCA_UPDATE_BASE overrides it (tests, a local server). The
 # same server under its pre-rename Parça address is tried next, then GitHub.
 UPDATE_BASE = os.environ.get("PARCA_UPDATE_BASE", "").strip().rstrip("/") or "https://api.ombriplay.com"
@@ -74,25 +86,23 @@ def _parse(version: str) -> tuple[int, ...]:
 
 
 def _latest_release(timeout: float = 5.0) -> dict | None:
-    """{"version", "zip_url", "sha256"}: from our server, or - if it can't
-    answer - from GitHub (no sha256 there). None when neither knows."""
+    """{"version", "zip_url", "sha256"} from our server's latest.json, ONLY if
+    it carries a valid signature by RELEASE_PUBLIC_KEY. None when no address
+    answers with a signed release (an unsigned/forged one counts as no answer)."""
     for base in (UPDATE_BASE, *FALLBACK_UPDATE_BASES):
         try:
             with urllib.request.urlopen(f"{base}/v1/client/latest", timeout=timeout) as resp:  # noqa: S310
                 info = json.load(resp)
-            version = str(info.get("version") or "").lstrip("vV")
-            if version and info.get("zip") and info.get("zip_sha256"):
-                return {"version": version, "zip_url": f"{base}/releases/{info['zip']}",
-                        "sha256": str(info["zip_sha256"]).lower()}
-        except Exception:  # noqa: BLE001 - try the next address, then GitHub
+        except Exception:  # noqa: BLE001 - try the next address
             continue
-    req = urllib.request.Request(RELEASES_URL, headers={"Accept": "application/vnd.github+json"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - fixed https URL
-        tag = (json.load(resp).get("tag_name") or "").lstrip("vV")
-    if not tag:
-        return None
-    return {"version": tag, "zip_url": f"https://github.com/{PUBLIC_REPO}/archive/refs/tags/v{tag}.zip",
-            "sha256": None}
+        if not isinstance(info, dict) or not sigcheck.release_is_signed(info, RELEASE_PUBLIC_KEY):
+            continue
+        version = str(info.get("version") or "").lstrip("vV")
+        zip_name = str(info.get("zip") or "")
+        if version and zip_name and info.get("zip_sha256") and "/" not in zip_name and ".." not in zip_name:
+            return {"version": version, "zip_url": f"{base}/releases/{zip_name}",
+                    "sha256": str(info["zip_sha256"]).lower()}
+    return None
 
 
 # git and pip are console programs: started from the windowless app (pythonw)
@@ -135,7 +145,7 @@ def _requirements_hash() -> str:
 def _download_release_zip(release: dict) -> bytes:
     with urllib.request.urlopen(release["zip_url"], timeout=120) as resp:  # noqa: S310 - our server or GitHub
         data = resp.read()
-    if release.get("sha256") and hashlib.sha256(data).hexdigest() != release["sha256"]:
+    if not release.get("sha256") or hashlib.sha256(data).hexdigest() != release["sha256"]:
         raise RuntimeError("o arquivo baixado não confere (sha256) - atualização recusada")
     return data
 
