@@ -24,16 +24,20 @@ VOICES: tuple[Voice, ...] = (
     Voice("yuri", "pt", "Yuri", "Yuri (masculina)", "Yuri (male)"),
     Voice("lily", "en", "Lily", "Lily (feminina, britânica)", "Lily (female, British)"),
     Voice("ivanna", "en", "Ivanna", "Ivanna (feminina, americana)", "Ivanna (female, American)"),
-    Voice("hale", "en", "Hale", "Hale (masculina, americana)", "Hale (male, American)"),
+    Voice("adam", "en", "Adam", "Adam (masculina, americana)", "Adam (male, American)"),
 )
 BY_KEY = {v.key: v for v in VOICES}
 DEFAULT_VOICE = "raquel"
 LANGUAGES = {"pt": "Português (Brasil)", "en": "English"}
-DEFAULT_VOICE_FOR = {"pt": "raquel", "en": "hale"}
+DEFAULT_VOICE_FOR = {"pt": "raquel", "en": "adam"}
+# A voice that was replaced (2026-10-16: Hale -> Adam): a saved choice of the old one
+# becomes the new one. Same table as server/languages.py VOICE_ALIASES.
+ALIASES = {"hale": "adam"}
 
 
 def get(key: str | None) -> Voice:
-    return BY_KEY.get((key or "").strip().lower()) or BY_KEY[DEFAULT_VOICE]
+    k = (key or "").strip().lower()
+    return BY_KEY.get(ALIASES.get(k, k)) or BY_KEY[DEFAULT_VOICE]
 
 
 def for_language(language: str) -> list[Voice]:

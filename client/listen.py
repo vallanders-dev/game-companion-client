@@ -203,6 +203,49 @@ SMART_TURN_MIN_TAKE = 1.0  # seconds of audio before the model is asked at all
 SMART_TURN_THRESHOLD = 0.85  # = turn_detect.THRESHOLD, see there
 LAST_STOP_SECONDS: float | None = None  # elapsed audio when the last take stopped (tests/telemetry)
 
+# With live words (0.1.19, server/live_stt.py) - owner, 2026-10-20: "Ombri's wait
+# ... slightly shorter, about 30%", and "Ombri cut my voice while I was using
+# 'ugh... uhmm' sounds - it should keep listening". Every wait is 30% shorter,
+# and a take whose last heard word leaves the thought open ("uh", "um", "you
+# know", "and", "the", "tipo", "é", "de"...) is never stopped by the model and
+# gets HOLD_SILENCE instead. No live words = the timings above, unchanged.
+LIVE_SMART_TURN_CHECKS = (0.5, 0.85)
+LIVE_SILENCE_FACTOR = 0.7
+HOLD_SILENCE = 3.0
+_OPEN_ENDINGS = {
+    "en": ("uh", "um", "uhm", "umm", "uhh", "er", "erm", "hmm", "hm", "ah", "so", "and", "but", "or", "the", "a",
+           "an", "of", "to", "with", "like", "because", "cause", "if", "then", "my", "your", "his", "her", "is",
+           "are", "was", "in", "on", "at", "for", "from", "that", "which", "where", "how", "what", "who", "when",
+           "you know", "i mean", "kind of", "sort of", "let me", "let me see", "wait", "about", "this", "these",
+           "i", "i m", "it s", "there s", "we", "they", "can", "could", "should", "would", "do", "does", "did"),
+    "pt": ("e", "eh", "ah", "ahn", "hum", "hm", "hmm", "um", "uma", "uh", "tipo", "entao", "mas", "ou", "o", "a",
+           "os", "as", "de", "do", "da", "dos", "das", "no", "na", "nos", "nas", "pra", "para", "pro", "com",
+           "que", "porque", "se", "meu", "minha", "seu", "sua", "ai", "ne", "assim", "sabe", "tipo assim",
+           "deixa eu", "deixa eu ver", "pera", "perai", "espera", "como", "onde", "quando", "qual", "quem",
+           "esse", "essa", "isso", "eu", "ele", "ela", "tem", "ta", "to", "e o", "e a", "em", "por", "pelo",
+           "pela", "sobre", "ate"),
+}
+
+
+def ends_mid_thought(text: str, language: str = "pt") -> bool:
+    """True when the live words so far stop on a filler or a connective - the
+    player is still in the middle of saying something. A final "?" means done."""
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    if raw.endswith(("-", "\u2014", "\u2013", "...", "\u2026", ",")):
+        return True
+    if raw.endswith(("?", "!")):
+        return False
+    import unicodedata
+    folded = "".join(c for c in unicodedata.normalize("NFKD", raw.lower()) if not unicodedata.combining(c))
+    words = "".join(c if c.isalnum() else " " for c in folded).split()
+    if not words:
+        return False
+    endings = _OPEN_ENDINGS.get(language, ()) + (_OPEN_ENDINGS["pt"] if language != "pt" else ())
+    tail1, tail2, tail3 = words[-1], " ".join(words[-2:]), " ".join(words[-3:])
+    return tail1 in endings or tail2 in endings or tail3 in endings
+
 
 def record_until_silence(
     *,
@@ -216,6 +259,7 @@ def record_until_silence(
     abort=None,
     min_speech_onset: float = 0.0,
     smart_turn: bool = True,
+    live=None,
 ) -> bytes | None:
     """Record the mic until it goes quiet, then return WAV bytes.
 
@@ -244,6 +288,12 @@ def record_until_silence(
     so far goes to the end-of-turn model (client/turn_detect.py); "finished"
     stops the recording right there instead of after ``silence_hang``. No model
     (not downloaded yet, failed) = the fixed wait, exactly as before.
+
+    ``live`` (0.1.19): an object with ``feed(block, speaking)`` (each block is
+    streamed to the server for live transcription), ``ok`` and
+    ``open_ended()`` (the words so far end mid-thought - ends_mid_thought()).
+    While it works the waits are LIVE_* (30% shorter) and an open-ended take
+    is held up to HOLD_SILENCE instead of being stopped.
 
     Returns ``None`` (caller should fall back to typed input) when there is no
     usable input device, the stream errors, Silero VAD can't be loaded, or
@@ -304,6 +354,7 @@ def record_until_silence(
                 _play_tone(_START_TONE_HZ)
                 print("  🎙️ Escutando...")
             speech_time = 0.0
+            hold_reason = ""
             while True:
                 try:
                     data, _overflow = stream.read(blocksize)
@@ -331,6 +382,25 @@ def record_until_silence(
                 else:
                     silence_run += _BLOCK_SECONDS
 
+                live_on = False
+                if live is not None:
+                    try:
+                        live.feed(mono, speech_detected)
+                        live_on = bool(live.ok)
+                    except Exception:  # noqa: BLE001 - live words are a bonus, never the recording
+                        live = None
+                checks = LIVE_SMART_TURN_CHECKS if live_on else SMART_TURN_CHECKS
+                hang = silence_hang * LIVE_SILENCE_FACTOR if live_on else silence_hang
+                held = False
+                if live_on and silence_run >= checks[0]:
+                    try:
+                        held = bool(live.open_ended())
+                    except Exception:  # noqa: BLE001
+                        held = False
+                    if held:
+                        hang = max(hang, HOLD_SILENCE)
+                        hold_reason = " (segurou: frase em aberto)"
+
                 # Not while speech is still building toward the onset: a
                 # sentence started just before the timeout isn't cut off.
                 if not speech_detected and elapsed >= no_speech_timeout and (
@@ -338,24 +408,24 @@ def record_until_silence(
                     if start_tone:
                         print(f"  (nada falado em {elapsed:.1f}s)")
                     return None
-                if (turn_model is not None and speech_detected
+                if (turn_model is not None and speech_detected and not held
                         and elapsed >= max(min_duration, SMART_TURN_MIN_TAKE + silence_run)
-                        and next_check < len(SMART_TURN_CHECKS)
-                        and silence_run >= SMART_TURN_CHECKS[next_check]):
+                        and next_check < len(checks)
+                        and silence_run >= checks[next_check]):
                     next_check += 1
                     try:
                         p_done = turn_model.probability(np.concatenate(blocks))
                     except Exception:  # noqa: BLE001 - a model error = the fixed wait
                         p_done, turn_model = 0.0, None
                     if p_done >= SMART_TURN_THRESHOLD:
-                        stop_reason = f"fim de fala ({silence_run:.1f}s, p={p_done:.2f})"
+                        stop_reason = f"fim de fala ({silence_run:.1f}s, p={p_done:.2f}){hold_reason}"
                         break
                 if (
                     speech_detected
                     and elapsed >= min_duration
-                    and silence_run >= silence_hang
+                    and silence_run >= hang
                 ):
-                    stop_reason = f"{silence_hang:.1f}s de silêncio"
+                    stop_reason = f"{hang:.1f}s de silêncio{hold_reason}"
                     break
                 if elapsed >= max_duration:
                     stop_reason = f"limite de {max_duration:.0f}s atingido"

@@ -75,7 +75,7 @@ from client.texts import t
 from client.gamepad import GamepadWatcher, describe_combo
 from client.gui.client import ROOT, HudClient
 from client.listen import play_confirm_tone, play_stop_tone, preload_vad_model, record_until_silence
-from client.net import AuthError, ServerError, ServerSession
+from client.net import AuthError, LiveTranscript, ServerError, ServerSession
 from client.speech import AudioOut
 from client.updater import check_for_update
 from client.voice_commands import VoiceListener
@@ -143,18 +143,38 @@ def _mic_busy():
             voice.set_mode(previous)
 
 
-def _record(settings) -> bytes | None:
+def _record(settings, live=None) -> bytes | None:
     with _mic_busy():
-        return _record_now(settings)
+        return _record_now(settings, live)
 
 
-def _record_now(settings) -> bytes | None:
+def _record_now(settings, live=None) -> bytes | None:
     return record_until_silence(
         silence_hang=settings.mic_silence_hang, max_duration=settings.mic_max_duration,
         min_duration=settings.mic_min_duration, vad_threshold=settings.mic_vad_threshold,
         speech_pad_ms=settings.mic_speech_pad_ms, no_speech_timeout=settings.mic_no_speech_timeout,
-        smart_turn=getattr(settings, "smart_turn", True),
+        smart_turn=getattr(settings, "smart_turn", True), live=live,
     )
+
+
+def _live(session, settings) -> LiveTranscript | None:
+    """Live words for the next recording (0.1.19, client/net.py LiveTranscript):
+    shorter waits, no cut on "uhm", the text ready as soon as you stop.
+    LIVE_WORDS=false turns it off (the recording works exactly as in 0.1.18)."""
+    if not getattr(settings, "live_words", True) or session is None:
+        return None
+    return LiveTranscript(session, voices.get(_voice).language)
+
+
+def _live_result(live, wav) -> str | None:
+    """Ends the live take; the id to send instead of the WAV, or None."""
+    if live is None:
+        return None
+    text = live.finish()
+    if text and wav:
+        telemetry(f"  (ouvido ao vivo: {text!r})")
+        return live.id
+    return None
 
 
 # The follow-up window (2026-10-14, owner-approved): after a real answer the
@@ -171,8 +191,10 @@ FOLLOW_UP_MIN_SPEECH = 0.35
 FOLLOW_UP_VAD_THRESHOLD = 0.6
 
 
-def _listen_for_follow_up(settings, triggers: list, seconds: float) -> tuple[bytes | None, object | None]:
-    """(WAV of a follow-up or None, a trigger pressed during the window or None)."""
+def _listen_for_follow_up(settings, triggers: list, seconds: float,
+                          session=None) -> tuple[bytes | None, object | None, str | None]:
+    """(WAV of a follow-up or None, a trigger pressed during the window or None,
+    the live take's id when its words were heard live)."""
     for trigger in triggers:
         trigger.clear()
     fired: list = []
@@ -184,6 +206,7 @@ def _listen_for_follow_up(settings, triggers: list, seconds: float) -> tuple[byt
         return hit is not None
 
     _UI.state("ouvindo")
+    live = _live(session, settings)
     with _mic_busy():
         wav = record_until_silence(
             silence_hang=settings.mic_silence_hang, max_duration=settings.mic_max_duration,
@@ -191,10 +214,11 @@ def _listen_for_follow_up(settings, triggers: list, seconds: float) -> tuple[byt
             vad_threshold=max(settings.mic_vad_threshold, FOLLOW_UP_VAD_THRESHOLD),
             speech_pad_ms=settings.mic_speech_pad_ms, no_speech_timeout=seconds,
             start_tone=False, abort=key_pressed, min_speech_onset=FOLLOW_UP_MIN_SPEECH,
-            smart_turn=getattr(settings, "smart_turn", True),
+            smart_turn=getattr(settings, "smart_turn", True), live=live,
         )
+    live_id = _live_result(live, wav)
     _UI.state("pensando" if wav else "idle")
-    return wav, (fired[0] if fired else None)
+    return wav, (fired[0] if fired else None), live_id
 
 
 def _sync_voice_listener(triggers: list) -> None:
@@ -404,7 +428,9 @@ def _remember_note(session: ServerSession, settings, game: str, barge: "BargeInW
 
     print(t("speak_note", hang=settings.mic_silence_hang))
     _UI.state("ouvindo")
-    wav = _record(settings)
+    live = _live(session, settings)
+    wav = _record(settings, live)
+    live_id = _live_result(live, wav)
     _UI.state("pensando")
     if not wav:
         _UI.state("idle")
@@ -433,7 +459,8 @@ def _remember_note(session: ServerSession, settings, game: str, barge: "BargeInW
 
     try:
         result = session.remember(
-            turn_id, game, wav, screenshot_bytes=screenshot, record_reply=record_reply,
+            turn_id, game, None if live_id else wav, screenshot_bytes=screenshot, record_reply=record_reply,
+            live_id=live_id,
             cancel=cancel, on_audio=on_audio, on_usage=_UI.usage,
         )
     except ServerError as exc:
@@ -575,6 +602,7 @@ def cmd_ask(_args: argparse.Namespace) -> int:
     active_game: str | None = None
     pending_fired = None
     follow_up_wav: bytes | None = None
+    follow_up_live: str | None = None  # the follow-up's words, heard live
 
     while True:
         # A voice (and language) picked in the settings window while this
@@ -657,7 +685,7 @@ def cmd_ask(_args: argparse.Namespace) -> int:
         if _VOICE is not None and fired is _VOICE.shush:
             continue  # a stop word with nothing playing: nothing to stop
         if fired is not None and _PAUSED.is_set():
-            follow_up_wav = None
+            follow_up_wav = follow_up_live = None
             continue  # paused from the tray: the key does nothing
 
         if fired is None and scene.strip().lower() == "jogo":
@@ -675,6 +703,7 @@ def cmd_ask(_args: argparse.Namespace) -> int:
             continue
 
         used_trigger = fired is not None
+        live_id = None  # this question's words, heard live (no WAV upload)
         from_wake = False
         heard_in_window = False  # this question came from the follow-up window, no key pressed
         question_text = None
@@ -693,6 +722,7 @@ def cmd_ask(_args: argparse.Namespace) -> int:
                 print(t("wake_heard"))
             if follow_up_wav is not None:
                 wav, follow_up_wav = follow_up_wav, None
+                live_id, follow_up_live = follow_up_live, None
                 heard_in_window = True
             elif wake_audio is not None:
                 wav = wake_audio  # "Ei Ombri, <question>": already recorded
@@ -700,7 +730,9 @@ def cmd_ask(_args: argparse.Namespace) -> int:
             else:
                 print(t("speak_question", hang=settings.mic_silence_hang))
                 _UI.state("ouvindo")
-                wav = _record(settings)
+                live = _live(session, settings)
+                wav = _record(settings, live)
+                live_id = _live_result(live, wav)
                 _UI.state("pensando" if wav else "idle")
             if not wav:
                 print(t("no_voice_type"))
@@ -764,10 +796,20 @@ def cmd_ask(_args: argparse.Namespace) -> int:
                     return
             audio_out.write(pcm, cancel)
 
+        def record_reply() -> bytes | None:
+            # F8 pressed for a note ("anota que...", "remind me that..."): the
+            # server asks "save it?" inside this turn - record the yes/no.
+            print(t("answer_yes_no"))
+            _UI.state("ouvindo")
+            reply = _record(settings)
+            _UI.state("pensando")
+            return reply
+
         try:
             result = session.ask(
-                turn_id, game, wav_bytes=wav, question_text=question_text, screenshot_bytes=screenshot,
-                wake=from_wake,
+                turn_id, game, wav_bytes=None if live_id else wav, question_text=question_text,
+                screenshot_bytes=screenshot, live_id=live_id,
+                wake=from_wake, record_reply=record_reply if wav else None, follow_up=heard_in_window,
                 controls=gamepad.input_kind(from_pad=fired is gamepad) if gamepad.available else "keyboard",
                 cancel=cancel, on_state=on_state, on_meta=on_meta, on_audio=on_audio, on_usage=_UI.usage,
             )
@@ -811,8 +853,11 @@ def cmd_ask(_args: argparse.Namespace) -> int:
         _UI.state("idle")
         _UI.connection("ok")
 
-        print(t("answer", text=result.get("answer_text", "")))
         outcome = result.get("outcome")
+        if outcome not in ("note_saved", "note_discarded", "ignored"):
+            print(t("answer", text=result.get("answer_text", "")))
+        elif outcome == "ignored":
+            telemetry("  (janela de continuação: não era pra mim - ignorado)")
         if pending_fired is None:
             # Server sends no audio for these - the client speaks them from
             # shipped assets, interruptible: a trigger pressed while one
@@ -825,6 +870,14 @@ def cmd_ask(_args: argparse.Namespace) -> int:
                 pending_fired = _speak_line("cap_reached", barge)
             elif outcome == "no_notes" and settings.remember_hotkey.lower() == NO_NOTES_BAKED_HOTKEY:
                 pending_fired = _speak_line(NO_NOTES_LINE, barge)
+            elif outcome == "note_saved":
+                # F8 pressed for a note, and the player said "yes" (0.1.19)
+                print(t("note_saved", text=result.get("answer_text", "")))
+                play_confirm_tone()
+                pending_fired = _speak_line("note_saved", barge, fallback_tone=False)
+            elif outcome == "note_discarded":
+                print(t("note_discarded", reason=result.get("stats", {}).get("reason", "")))
+                play_stop_tone()
             elif outcome == "closing" and not heard_in_window:
                 # A "valeu"/"interesting" heard by the follow-up window ends
                 # the chat silently - the player was just reacting, not asking.
@@ -851,7 +904,8 @@ def cmd_ask(_args: argparse.Namespace) -> int:
         follow_seconds = load_follow_up_seconds()
         if (follow_seconds > 0 and pending_fired is None and outcome in FOLLOW_UP_OUTCOMES
                 and not result.get("interrupted") and not _PAUSED.is_set()):
-            follow_up_wav, pending_fired = _listen_for_follow_up(settings, all_triggers, follow_seconds)
+            follow_up_wav, pending_fired, follow_up_live = _listen_for_follow_up(
+                settings, all_triggers, follow_seconds, session)
             if follow_up_wav is not None:
                 telemetry("  (janela de continuação: fala ouvida)")
         print("-" * 48)

@@ -60,6 +60,138 @@ def _unpack_audio_frame(frame: bytes) -> tuple[int, bytes]:
     return struct.unpack(">I", frame[:4])[0], frame[4:]
 
 
+class LiveTranscript:
+    """Live words while the player talks (0.1.19, server/live_stt.py).
+
+    Handed to listen.record_until_silence(live=...): each mic block arrives
+    through feed(block, speaking). Nothing is sent until speech is first
+    heard (a silent follow-up window costs nothing); then the audio so far
+    and every ~100 ms after it go to the server, and the words that come back
+    are kept in `text`. Single-threaded on purpose: incoming messages are
+    read without waiting, right after each send, on the recording thread.
+    Any failure turns it off (`ok` False) - the caller then sends the WAV as
+    before. Holds the session's I/O lock from the first send to finish()."""
+
+    CHUNK_BYTES = 3200  # 100 ms of 16 kHz s16le
+
+    def __init__(self, session: "ServerSession", language: str = "pt") -> None:
+        import uuid
+        self._s = session
+        self.id = "live-" + uuid.uuid4().hex[:12]
+        self.language = language
+        self.ok = True
+        self.started = False
+        self.text = ""
+        self.final: str | None = None
+        self._early: list[bytes] = []
+        self._buf = b""
+        self._locked = False
+
+    @staticmethod
+    def _pcm16(block) -> bytes:
+        import numpy as np
+        return (np.clip(block, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
+
+    def _fail(self) -> None:
+        self.ok = False
+        self._release()
+
+    def _release(self) -> None:
+        if self._locked:
+            self._locked = False
+            try:
+                self._s._io_lock.release()
+            except RuntimeError:
+                pass
+
+    def _send(self, payload: dict) -> None:
+        self._s._ws.send(json.dumps(payload))
+
+    def _drain(self, wait: float = 0.0) -> None:
+        """Reads what the server sent so far (or waits up to `wait` for the final)."""
+        import time as _time
+        deadline = _time.perf_counter() + wait
+        while True:
+            left = max(0.0, deadline - _time.perf_counter())
+            try:
+                raw = self._s._ws.recv(timeout=left)
+            except TimeoutError:
+                return
+            if isinstance(raw, (bytes, bytearray)):
+                continue  # a stray audio frame from a turn that just ended
+            msg = json.loads(raw)
+            if msg.get("id") != self.id:
+                continue
+            if msg.get("type") == "listen_partial":
+                self.text = str(msg.get("text", ""))
+            elif msg.get("type") == "listen_final":
+                self.final = str(msg.get("text", "")) if not msg.get("error") else ""
+                if self.final:
+                    self.text = self.final
+                return
+            if wait and _time.perf_counter() >= deadline:
+                return
+
+    def feed(self, block, speaking: bool) -> None:
+        if not self.ok:
+            return
+        pcm = self._pcm16(block)
+        try:
+            if not self.started:
+                self._early.append(pcm)
+                if not speaking:
+                    self._early = self._early[-16:]  # ~0.5 s before the first word
+                    return
+                if self._s._ws is None or not self._s.connected():
+                    self._fail()
+                    return
+                self._s._io_lock.acquire()
+                self._locked = True
+                self._send({"type": "listen_start", "id": self.id, **self._s._voice_field()})
+                self.started = True
+                self._buf = b"".join(self._early)
+                self._early = []
+            else:
+                self._buf += pcm
+            if len(self._buf) >= self.CHUNK_BYTES:
+                import base64
+                self._send({"type": "listen_audio", "id": self.id,
+                            "pcm": base64.b64encode(self._buf).decode("ascii")})
+                self._buf = b""
+            self._drain()
+            if self.final == "":  # the server gave up on it (e.g. cap reached) - the WAV goes instead
+                self._fail()
+        except Exception:  # noqa: BLE001 - a dead connection: the turn's own send reconnects
+            self._s.close()
+            self._fail()
+
+    def open_ended(self) -> bool:
+        from client.listen import ends_mid_thought
+        return ends_mid_thought(self.text, self.language)
+
+    def finish(self, timeout: float = 2.5) -> str | None:
+        """Ends the take; the final text, or None (not started / failed -
+        send the WAV)."""
+        try:
+            if not self.ok or not self.started:
+                return None
+            import base64
+            if self._buf:
+                self._send({"type": "listen_audio", "id": self.id,
+                            "pcm": base64.b64encode(self._buf).decode("ascii")})
+                self._buf = b""
+            self._send({"type": "listen_end", "id": self.id})
+            if self.final is None:
+                self._drain(wait=timeout)
+            return self.final or None
+        except Exception:  # noqa: BLE001
+            self._s.close()
+            return None
+        finally:
+            self.ok = False
+            self._release()
+
+
 class ServerSession:
     def __init__(self, server_url: str, token: str, voice: str | None = None,
                  fallback_urls: tuple[str, ...] = ()) -> None:
@@ -235,6 +367,9 @@ class ServerSession:
         on_usage=None,
         wake: bool = False,
         controls: str = "",
+        record_reply=None,
+        follow_up: bool = False,
+        live_id: str | None = None,
     ) -> dict:
         """One ask-turn, start to finish - blocks until `turn_result`
         arrives (or the connection breaks). `wav_bytes` is the real path
@@ -256,6 +391,11 @@ class ServerSession:
         Callbacks fire synchronously, on the calling thread, as each
         message arrives - `on_audio(pcm, turn_seq)` is where the caller
         writes to its own `AudioOut`.
+        `record_reply` (0.1.19): F8 pressed for a NOTE - the server asks "save
+        it?" inside this turn, and this records the spoken yes/no exactly as
+        remember() does (on the "ouvindo" state). `follow_up`: the audio came
+        from the follow-up window (no key pressed) - the server drops speech
+        that isn't meant for Ombri.
         """
         msg: dict = {
             "type": "turn_start", "turn_id": turn_id, "kind": "ask", "game": game,
@@ -270,6 +410,12 @@ class ServerSession:
             msg["wake"] = True  # audio starts with "Ei, Ombri" (client/voice_commands.py)
         if controls:
             msg["controls"] = controls  # keyboard / xbox / playstation / switch / controller
+        if record_reply is not None:
+            msg["can_confirm"] = True
+        if follow_up:
+            msg["follow_up"] = True
+        if live_id:
+            msg["live_id"] = live_id  # heard live (LiveTranscript): the server has the words, no WAV needed
         frames: list = [json.dumps(msg)]
         if screenshot_bytes is not None:
             frames.append(screenshot_bytes)
@@ -277,9 +423,10 @@ class ServerSession:
             frames.append(wav_bytes)
         self._send_opening(frames)
 
-        return self._pump(turn_id, cancel, on_state, on_meta, on_text, on_audio, on_usage)
+        return self._pump(turn_id, cancel, on_state, on_meta, on_text, on_audio, on_usage, record_reply)
 
-    def _pump(self, turn_id: str, cancel, on_state, on_meta, on_text, on_audio, on_usage) -> dict:
+    def _pump(self, turn_id: str, cancel, on_state, on_meta, on_text, on_audio, on_usage,
+              record_reply=None) -> dict:
         cancel_sent = False
         while True:
             if cancel is not None and cancel.is_set() and not cancel_sent:
@@ -304,8 +451,22 @@ class ServerSession:
 
             data = json.loads(raw)
             mtype = data.get("type")
-            if mtype == "turn_state" and on_state is not None:
-                on_state(data["state"])
+            if mtype == "turn_state":
+                if on_state is not None:
+                    on_state(data["state"])
+                if data["state"] == "ouvindo" and record_reply is not None:
+                    # F8 pressed for a note: the server's "save it?" has been
+                    # spoken - record the yes/no and send it (see remember()).
+                    reply_wav = record_reply()
+                    try:
+                        self._ws.send(json.dumps({
+                            "type": "turn_continue", "turn_id": turn_id, "has_audio": bool(reply_wav),
+                        }))
+                        if reply_wav:
+                            self._ws.send(reply_wav)
+                    except Exception as exc:  # noqa: BLE001
+                        self.close()
+                        raise ServerError(f"conexão caiu durante o turno: {exc}") from exc
             elif mtype == "turn_meta" and on_meta is not None:
                 on_meta(data["question"], data["scene"])
             elif mtype == "turn_text" and on_text is not None:
@@ -323,10 +484,11 @@ class ServerSession:
         self,
         turn_id: str,
         game: str,
-        note_wav: bytes,
+        note_wav: bytes | None,
         *,
         screenshot_bytes: bytes | None = None,
         record_reply,
+        live_id: str | None = None,
         cancel: threading.Event | None = None,
         on_state=None,
         on_audio=None,
@@ -350,13 +512,16 @@ class ServerSession:
         """
         msg = {
             "type": "turn_start", "turn_id": turn_id, "kind": "remember", "game": game,
-            "has_screenshot": screenshot_bytes is not None, "has_audio": True,
+            "has_screenshot": screenshot_bytes is not None, "has_audio": note_wav is not None,
             **self._voice_field(),
         }
+        if live_id:
+            msg["live_id"] = live_id
         frames: list = [json.dumps(msg)]
         if screenshot_bytes is not None:
             frames.append(screenshot_bytes)
-        frames.append(note_wav)
+        if note_wav is not None:
+            frames.append(note_wav)
         self._send_opening(frames)
 
         cancel_sent = False

@@ -100,6 +100,9 @@ class ClientSettings:
     # End-of-turn model (client/turn_detect.py): stop listening when the
     # sentence is finished instead of after mic_silence_hang. SMART_TURN=false = the fixed wait.
     smart_turn: bool = True
+    # Live words while you talk (0.1.19, client/net.py LiveTranscript): 30% shorter
+    # waits, no cut on "uhm", the text ready when you stop. LIVE_WORDS=false = off.
+    live_words: bool = True
 
 
 def load_user_config() -> dict:
@@ -282,4 +285,5 @@ def load_client_settings() -> ClientSettings:
             "GAME_VOICE_MATCH_MIN_RATIO", DEFAULT_GAME_VOICE_MATCH_MIN_RATIO
         ),
         smart_turn=_bool_env("SMART_TURN", True),
+        live_words=_bool_env("LIVE_WORDS", True),
     )
