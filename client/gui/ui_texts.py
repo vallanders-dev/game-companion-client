@@ -40,6 +40,10 @@ UI = {
         "update_body": "A versão {version} está pronta. Reinicie o Ombri pra atualizar: leva alguns segundos.",
         "update_yes": "Reiniciar", "update_no": "Depois",
         "announce_title": "Novidade do Ombri", "announce_ok": "Ok",
+        "survey_title": "Me ajuda a escolher meu jeito?",
+        "survey_body": "Gravei as mesmas respostas de quatro jeitos. Ouve e me diz qual você prefere "
+                       "no meio do jogo: leva uns 4 minutos.",
+        "survey_yes": "Quero participar", "survey_no": "Agora não",
         "offline_title": "Sem conexão com o servidor",
         "offline_body": "O Ombri tenta de novo sozinho. Confira sua internet.",
     },
@@ -78,6 +82,10 @@ UI = {
         "update_body": "Version {version} is ready. Restart Ombri to update: it takes a few seconds.",
         "update_yes": "Restart", "update_no": "Later",
         "announce_title": "Ombri news", "announce_ok": "OK",
+        "survey_title": "Help me pick how I talk?",
+        "survey_body": "I recorded the same answers in four styles. Listen and tell me which one "
+                       "you'd rather hear mid-game: takes about 4 minutes.",
+        "survey_yes": "I'm in", "survey_no": "Not now",
         "offline_title": "No connection to the server",
         "offline_body": "Ombri keeps retrying on its own. Check your internet.",
     },

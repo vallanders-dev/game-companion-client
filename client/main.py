@@ -579,6 +579,7 @@ def cmd_ask(_args: argparse.Namespace) -> int:
                "pad": _short_combo(describe_combo(gamepad.combo)) if gamepad.available else None}
     _send_ui_info(ui_keys)
     _show_announcement(session.announce)
+    _show_survey(session)
     threading.Thread(target=_watch_for_updates, name="update-watch", daemon=True).start()
 
     # All three triggers, as in the original app: F6 mid-answer interrupts
@@ -1002,6 +1003,8 @@ def _on_ui_command(cmd: str) -> None:
         _relaunch_as_admin()
     elif cmd == "restart_update":
         _restart_for_update()
+    elif cmd in ("survey_open", "survey_later"):
+        _answer_survey(cmd == "survey_open")
 
 
 def _restart_for_update() -> None:
@@ -1046,6 +1049,76 @@ def _watch_for_updates() -> None:
 
 
 ANNOUNCE_SEEN_PATH = None  # set lazily: %APPDATA%/Parca/announcements_seen.json
+SURVEY_MAX_SHOWS = 3  # a notice that times out unanswered comes back on a later start, up to this
+_SURVEY: dict = {}  # the invite shown this run: {"id", "url"}
+
+
+def _survey_log():
+    from client.config import USER_SETTINGS_DIR
+
+    return USER_SETTINGS_DIR / "surveys.json"
+
+
+def _survey_state() -> dict:
+    try:
+        data = json.loads(_survey_log().read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_survey_state(state: dict) -> None:
+    try:
+        path = _survey_log()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _survey_url(server_url: str, code: str) -> str | None:
+    """https://<the server this app talks to>/ouvir/?l=pt#<code> - only for our
+    own hosts, whatever the server sent."""
+    from urllib.parse import quote, urlsplit
+
+    host = urlsplit(server_url).hostname or ""
+    if host not in ("api.ombriplay.com", "api.parcaplay.com"):
+        return None
+    lang = "en" if texts.language() == "en" else "pt"
+    return f"https://{host}/ouvir/?l={lang}#{quote(code, safe='.')}"
+
+
+def _show_survey(session) -> None:
+    """The personality test invite (auth_ok "survey", 0.1.20+): "Quero
+    participar" opens the test page in the browser. Answered (either button) =
+    never again; ignored until it hides = shown again on a later start, at most
+    SURVEY_MAX_SHOWS times."""
+    survey = getattr(session, "survey", None)
+    if not survey:
+        return
+    state = _survey_state()
+    entry = state.get(survey["id"]) or {}
+    if entry.get("answered") or entry.get("shows", 0) >= SURVEY_MAX_SHOWS:
+        return
+    url = _survey_url(session.server_url, str(survey["code"]))
+    if not url:
+        return
+    _SURVEY.update(id=survey["id"], url=url)
+    state[survey["id"]] = {"shows": entry.get("shows", 0) + 1}
+    _save_survey_state(state)
+    _UI.notice("survey")
+
+
+def _answer_survey(join: bool) -> None:
+    if not _SURVEY:
+        return
+    state = _survey_state()
+    state[_SURVEY["id"]] = {**(state.get(_SURVEY["id"]) or {}), "answered": "open" if join else "later"}
+    _save_survey_state(state)
+    if join:
+        import webbrowser
+
+        webbrowser.open(_SURVEY["url"])
 
 
 def _show_announcement(announce: dict | None) -> None:
@@ -1148,15 +1221,22 @@ def _log_without_console() -> None:
     """Started by pythonw.exe (the desktop icon since 2026-09-29) there is
     no console: print() would go nowhere and any direct write to stdout
     would raise. Everything goes to output/parca.log instead (the previous
-    run's kept as parca.prev.log)."""
+    run's kept as parca.prev.log). The copy started after an update finds
+    parca.log still open in the updating parent, which waits for it: Windows
+    refuses the rename, so it appends to the parent's file (until 0.1.19 it
+    fell to devnull and the whole session after an update went unlogged).
+    Always append mode: two copies writing one file each land at its end."""
     if sys.stdout is not None and sys.stderr is not None:
         return
     log = ROOT / "output" / "parca.log"
     try:
         log.parent.mkdir(parents=True, exist_ok=True)
         if log.exists():
-            log.replace(log.with_name("parca.prev.log"))
-        stream = open(log, "w", encoding="utf-8", buffering=1)
+            try:
+                log.replace(log.with_name("parca.prev.log"))
+            except OSError:
+                pass
+        stream = open(log, "a", encoding="utf-8", buffering=1)
     except OSError:
         stream = open(os.devnull, "w", encoding="utf-8")
     sys.stdout = sys.stdout or stream

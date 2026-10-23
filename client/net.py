@@ -249,6 +249,8 @@ class ServerSession:
             self.usage = (int(msg["usage_count"]), int(msg["daily_cap"]))
         announce = msg.get("announce")
         self.announce = announce if isinstance(announce, dict) and announce.get("id") else None
+        survey = msg.get("survey")  # the personality test invite (0.1.20+)
+        self.survey = survey if isinstance(survey, dict) and survey.get("id") and survey.get("code") else None
         return self.display_name
 
     def connected(self) -> bool:

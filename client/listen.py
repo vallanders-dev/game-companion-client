@@ -198,9 +198,15 @@ def preload_vad_model() -> bool:
 # 0.3 s the model stopped 19 of 45 mid-sentence pauses early ("No, <pause> there's
 # a gate..."); at 0.7 s with takes >= 1 s, 2 of 9, and 15 of 27 questions still end
 # early. Shorter takes are never cut: a lone "No," / "Exactly." is usually an opener.
-SMART_TURN_CHECKS = (0.7, 1.2)
+# 0.1.20 (owner, 2026-10-21: "it cut me while I was speaking - it should not cut
+# off while the gamer is speaking"): asked from 1.0 s, and only a surer "done"
+# (0.90) stops. eval/turn_cut_probe.py, 157 real pauses players talked on after
+# (owner's Witcher + Hugario's DST recordings): stops at a pause 66 (0.1.18 and
+# 0.1.19 alike) -> 39; the typical stop after a real end 0.5 s -> 1.5 s. The
+# usual cut was an opener + a short pause ("Ei, Ombri, me ajuda aqui." 0.6 s ...).
+SMART_TURN_CHECKS = (1.0, 1.5)
 SMART_TURN_MIN_TAKE = 1.0  # seconds of audio before the model is asked at all
-SMART_TURN_THRESHOLD = 0.85  # = turn_detect.THRESHOLD, see there
+SMART_TURN_THRESHOLD = 0.90  # surer than turn_detect.THRESHOLD (0.85), see above
 LAST_STOP_SECONDS: float | None = None  # elapsed audio when the last take stopped (tests/telemetry)
 
 # With live words (0.1.19, server/live_stt.py) - owner, 2026-10-20: "Ombri's wait
@@ -209,8 +215,10 @@ LAST_STOP_SECONDS: float | None = None  # elapsed audio when the last take stopp
 # and a take whose last heard word leaves the thought open ("uh", "um", "you
 # know", "and", "the", "tipo", "é", "de"...) is never stopped by the model and
 # gets HOLD_SILENCE instead. No live words = the timings above, unchanged.
-LIVE_SMART_TURN_CHECKS = (0.5, 0.85)
-LIVE_SILENCE_FACTOR = 0.7
+# 0.1.20: the 30% shorter waits are gone (the owner was cut off mid-sentence on
+# 0.1.19, see SMART_TURN_CHECKS); live words keep only the open-thought hold.
+LIVE_SMART_TURN_CHECKS = SMART_TURN_CHECKS
+LIVE_SILENCE_FACTOR = 1.0
 HOLD_SILENCE = 3.0
 _OPEN_ENDINGS = {
     "en": ("uh", "um", "uhm", "umm", "uhh", "er", "erm", "hmm", "hm", "ah", "so", "and", "but", "or", "the", "a",

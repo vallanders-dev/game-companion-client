@@ -24,7 +24,7 @@ VOICES: tuple[Voice, ...] = (
     Voice("yuri", "pt", "Yuri", "Yuri (masculina)", "Yuri (male)"),
     Voice("lily", "en", "Lily", "Lily (feminina, britânica)", "Lily (female, British)"),
     Voice("ivanna", "en", "Ivanna", "Ivanna (feminina, americana)", "Ivanna (female, American)"),
-    Voice("adam", "en", "Adam", "Adam (masculina, americana)", "Adam (male, American)"),
+    Voice("adam", "en", "Adam", "Adam (masculina, britânica)", "Adam (male, British)"),
 )
 BY_KEY = {v.key: v for v in VOICES}
 DEFAULT_VOICE = "raquel"

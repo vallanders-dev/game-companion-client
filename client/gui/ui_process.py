@@ -26,11 +26,11 @@ stdin, JSON lines from the client:
   {"type": "conn", "state": "connecting|ok|offline"}
   {"type": "info", "lang": "pt|en", "voice": str, "keys": {"ask", "note", "pad"}}
   {"type": "paused", "on": bool}
-  {"type": "notice", "kind": "admin|offline|update|announce", "version"?, "text"?}
+  {"type": "notice", "kind": "admin|offline|update|announce|survey", "version"?, "text"?}
   {"type": "show"}
 stdout, JSON lines back to the client (the ONLY thing written there - every
 diagnostic print goes to stderr, i.e. output/overlay.log):
-  {"cmd": "quit" | "pause" | "resume" | "settings" | "relaunch_admin"}
+  {"cmd": "quit" | "pause" | "resume" | "settings" | "relaunch_admin" | "survey_open" | "survey_later"}
 Exits on stdin EOF, i.e. whenever the client exits.
 """
 from __future__ import annotations
@@ -171,9 +171,10 @@ class Notice(QWidget):
             buttons.addWidget(b, 1)
         col.addSpacing(4)
         col.addLayout(buttons)
-        self.no.clicked.connect(self.hide)
+        self.no.clicked.connect(self._no)
         self.yes.clicked.connect(self._yes)
         self._on_yes = None
+        self._on_no = None
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self.hide)
@@ -183,7 +184,12 @@ class Notice(QWidget):
         if self._on_yes:
             self._on_yes()
 
-    def pop(self, title: str, body: str, yes: str | None, no: str | None, on_yes=None) -> None:
+    def _no(self) -> None:
+        self.hide()
+        if self._on_no:
+            self._on_no()
+
+    def pop(self, title: str, body: str, yes: str | None, no: str | None, on_yes=None, on_no=None) -> None:
         self.title.setText(title)
         self.body.setText(body)
         self.yes.setVisible(bool(yes))
@@ -191,6 +197,7 @@ class Notice(QWidget):
         self.yes.setText(yes or "")
         self.no.setText(no or "")
         self._on_yes = on_yes
+        self._on_no = on_no
         self.adjustSize()
         geo = QApplication.primaryScreen().availableGeometry()
         self.move(QPoint(geo.right() - self.width() - 16, geo.bottom() - self.height() - 16))
@@ -362,6 +369,9 @@ class Ui:
                             ui(L, "update_yes"), ui(L, "update_no"), on_yes=lambda: _send("restart_update"))
         elif kind == "announce" and (msg or {}).get("text"):
             self.notice.pop(ui(L, "announce_title"), str(msg["text"]), ui(L, "announce_ok"), None)
+        elif kind == "survey":
+            self.notice.pop(ui(L, "survey_title"), ui(L, "survey_body"), ui(L, "survey_yes"), ui(L, "survey_no"),
+                            on_yes=lambda: _send("survey_open"), on_no=lambda: _send("survey_later"))
 
 
 def main() -> None:
