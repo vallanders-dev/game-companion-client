@@ -33,8 +33,9 @@ class HudClient:
                  start_in_tray: bool = False) -> None:
         """`on_command(name)` is called, on a reader thread, for each command
         the UI sends back ("quit", "pause", "resume", "settings",
-        "relaunch_admin"). `start_in_tray`: don't open the main window at
-        start (a relaunch while the game is in front)."""
+        "relaunch_admin", "notes_list", "notes_delete:<id>"). `start_in_tray`:
+        don't open the main window at start (a relaunch while the game is in
+        front)."""
         self.enabled = False
         self.error: str | None = None
         self._queue: queue.Queue = queue.Queue()
@@ -172,3 +173,14 @@ class HudClient:
 
     def show(self) -> None:
         self._send({"type": "show"})
+
+    def features(self, features) -> None:
+        """What the server can do (auth_ok.features): "notes" turns the
+        "Minhas notas" page on. Sent after each connect."""
+        self._send({"type": "features", "list": sorted(str(f) for f in features)})
+
+    def notes(self, items: list[dict], error: str = "") -> None:
+        """The answer to the UI's "notes_list" / "notes_delete:<id>" commands:
+        the tester's notes, newest first ({id, game, note, created, source}),
+        or an error line to show instead."""
+        self._send({"type": "notes", "items": list(items), "error": error})

@@ -85,10 +85,17 @@ def _parse(version: str) -> tuple[int, ...]:
     return tuple(parts)
 
 
+# The most an update download may be when the signed latest.json carries no
+# zip_size (releases before 2026-10-27 - every later one does; see
+# tools/publish_client.py): a real release zip is ~2 MB.
+MAX_RELEASE_BYTES = 200 * 1024 * 1024
+
+
 def _latest_release(timeout: float = 5.0) -> dict | None:
-    """{"version", "zip_url", "sha256"} from our server's latest.json, ONLY if
-    it carries a valid signature by RELEASE_PUBLIC_KEY. None when no address
-    answers with a signed release (an unsigned/forged one counts as no answer)."""
+    """{"version", "zip_url", "sha256", "size"} from our server's latest.json,
+    ONLY if it carries a valid signature by RELEASE_PUBLIC_KEY. None when no
+    address answers with a signed release (an unsigned/forged one counts as
+    no answer). "size" is the signed zip_size, or None for an older release."""
     for base in (UPDATE_BASE, *FALLBACK_UPDATE_BASES):
         try:
             with urllib.request.urlopen(f"{base}/v1/client/latest", timeout=timeout) as resp:  # noqa: S310
@@ -100,8 +107,10 @@ def _latest_release(timeout: float = 5.0) -> dict | None:
         version = str(info.get("version") or "").lstrip("vV")
         zip_name = str(info.get("zip") or "")
         if version and zip_name and info.get("zip_sha256") and "/" not in zip_name and ".." not in zip_name:
+            size = info.get("zip_size")
             return {"version": version, "zip_url": f"{base}/releases/{zip_name}",
-                    "sha256": str(info["zip_sha256"]).lower()}
+                    "sha256": str(info["zip_sha256"]).lower(),
+                    "size": int(size) if isinstance(size, int) and not isinstance(size, bool) and size > 0 else None}
     return None
 
 
@@ -143,8 +152,15 @@ def _requirements_hash() -> str:
 
 
 def _download_release_zip(release: dict) -> bytes:
-    with urllib.request.urlopen(release["zip_url"], timeout=120) as resp:  # noqa: S310 - our server or GitHub
-        data = resp.read()
+    """The zip, read up to the SIGNED size and no further (security audit
+    2026-10-27): the sha256 check below already refuses a swapped file, but
+    only after reading all of it, and a server that was taken over could
+    answer with gigabytes. Past the limit the download is dropped, unread."""
+    limit = release.get("size") or MAX_RELEASE_BYTES
+    with urllib.request.urlopen(release["zip_url"], timeout=120) as resp:  # noqa: S310 - our server
+        data = resp.read(limit + 1)
+    if len(data) > limit:
+        raise RuntimeError("o arquivo baixado é maior que o anunciado - atualização recusada")
     if not release.get("sha256") or hashlib.sha256(data).hexdigest() != release["sha256"]:
         raise RuntimeError("o arquivo baixado não confere (sha256) - atualização recusada")
     return data

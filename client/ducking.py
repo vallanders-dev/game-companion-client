@@ -38,7 +38,7 @@ from client import config
 STATE_PATH = config.USER_SETTINGS_DIR / "ducked.json"
 RESTORE_DELAY_SECONDS = 0.6  # back-to-back lines (filler -> answer -> "Anotado") don't pump the volume
 _TOLERANCE = 0.02  # "still where we put it"
-_OWN_EXES = {"python.exe", "pythonw.exe"}
+_OWN_EXES = {"python.exe", "pythonw.exe", "ombri.exe"}
 
 
 class _Backend:

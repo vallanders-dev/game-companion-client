@@ -19,17 +19,23 @@ class Voice:
     label_en: str
 
 
+# Visible names are stars (owner, 2026-10-27 / set chosen 2026-10-31), so they
+# sound like Ombri's own voices; the keys stay the old ElevenLabs names for
+# saved settings and the server.
 VOICES: tuple[Voice, ...] = (
-    Voice("raquel", "pt", "Raquel", "Raquel (feminina)", "Raquel (female)"),
-    Voice("yuri", "pt", "Yuri", "Yuri (masculina)", "Yuri (male)"),
-    Voice("lily", "en", "Lily", "Lily (feminina, britânica)", "Lily (female, British)"),
-    Voice("ivanna", "en", "Ivanna", "Ivanna (feminina, americana)", "Ivanna (female, American)"),
-    Voice("adam", "en", "Adam", "Adam (masculina, britânica)", "Adam (male, British)"),
+    Voice("yuri", "pt", "Rigel", "Rigel (calmo)", "Rigel (calm)"),
+    Voice("raquel", "pt", "Mira", "Mira (calorosa)", "Mira (warm)"),
+    Voice("lily", "en", "Alya", "Alya (vibrante, britânica)", "Alya (bright, British)"),
+    Voice("ivanna", "en", "Spica", "Spica (animada, americana)", "Spica (lively, American)"),
+    Voice("adam", "en", "Altair", "Altair (firme, britânico)", "Altair (steady, British)"),
 )
 BY_KEY = {v.key: v for v in VOICES}
-DEFAULT_VOICE = "raquel"
+# Rigel is Ombri's signature pt voice (owner, 2026-11-02: brand identity, "o
+# Ombri"); a tester who already picked Mira keeps her. The server's fallback for
+# a request with no voice stays Raquel (server/languages.py).
+DEFAULT_VOICE = "yuri"
 LANGUAGES = {"pt": "Português (Brasil)", "en": "English"}
-DEFAULT_VOICE_FOR = {"pt": "raquel", "en": "adam"}
+DEFAULT_VOICE_FOR = {"pt": "yuri", "en": "adam"}
 # A voice that was replaced (2026-10-16: Hale -> Adam): a saved choice of the old one
 # becomes the new one. Same table as server/languages.py VOICE_ALIASES.
 ALIASES = {"hale": "adam"}

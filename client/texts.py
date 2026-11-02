@@ -62,6 +62,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "note_discarded": "  Nota descartada ({reason}).",
         "note_cap": "  {text} (nota não salva)",
         "voice_changed": "  Voz agora: {name}.",
+        "recap_offer": "  '{game}' fechou: perguntando se guardo onde você parou...",
+        "recap_nothing": "  (nada pra guardar desta sessão)",
     },
     "en": {
         "connecting": "Connecting to {url}...",
@@ -113,6 +115,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "note_discarded": "  Note discarded ({reason}).",
         "note_cap": "  {text} (note not saved)",
         "voice_changed": "  Voice is now: {name}.",
+        "recap_offer": "  '{game}' closed: asking whether to keep where you stopped...",
+        "recap_nothing": "  (nothing to keep from this session)",
     },
 }
 

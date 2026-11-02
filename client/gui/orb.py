@@ -117,3 +117,13 @@ def claim_taskbar_identity() -> None:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Parca.Desktop")
     except (OSError, AttributeError):
         pass
+    # Notifications are headed by the ID's registered name - with none, Windows
+    # printed "Parca.Desktop" over "Ombri is still here in the tray" (owner's
+    # recording, 2026-10-29).
+    try:
+        import winreg
+
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\AppUserModelId\Parca.Desktop") as key:
+            winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, "Ombri")
+    except OSError:
+        pass

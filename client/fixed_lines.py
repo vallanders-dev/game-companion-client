@@ -54,7 +54,7 @@ TEXTS: dict[str, dict[str, str]] = {
         "web_search_still": "Tô quase lá, só mais um instante.",
         # A second copy of the client (both would hear every key press and
         # answer twice - seen with the first tester).
-        "already_running": "O Ombri já está aberto em outra janela. Feche a outra antes de abrir de novo.",
+        "already_running": "Eu já estou rodando em outra janela. Feche aquela antes de me abrir de novo.",
         # Played by the settings window's "Ouvir" button.
         "sample": "Oi! Eu sou o Ombri. É só apertar F8 e me perguntar o que quiser sobre o seu jogo.",
     },
@@ -70,7 +70,7 @@ TEXTS: dict[str, dict[str, str]] = {
                             "choosing Run as administrator.",
         "web_search": "Let me look that up real quick.",
         "web_search_still": "Almost there, just a moment.",
-        "already_running": "Ombri is already open in another window. Close that one before opening it again.",
+        "already_running": "I'm already open in another window. Close that one before opening me again.",
         "sample": "Hey! I'm Ombri. Just press F8 and ask me anything about your game.",
     },
 }

@@ -687,7 +687,7 @@ _NOT_GAME_EXES = frozenset({
     "battle.net", "riotclientservices", "xboxapp", "gamebar", "code", "devenv", "notepad", "notepad++",
     "winword", "excel", "powerpnt", "acrobat", "acrord32", "cmd", "powershell", "pwsh", "windowsterminal",
     "taskmgr", "searchhost", "shellexperiencehost", "startmenuexperiencehost", "lockapp",
-    "systemsettings", "python", "pythonw", "hydra", "hydralauncher",
+    "systemsettings", "python", "pythonw", "ombri", "hydra", "hydralauncher",
     "microsoft.media.player", "microsoft.photos", "photos", "msteams", "olk", "outlook", "onenote",
     "snippingtool", "screenclippinghost", "msedgewebview2", "kodi", "plex", "plexamp", "netflix",
     "stremio", "jellyfinmediaplayer", "kmplayer64", "gom", "smplayer", "anydesk", "teamviewer",
@@ -869,6 +869,38 @@ def remember_game_for_foreground(name: str) -> Path | None:
     return exe_path
 
 
+# The process behind the last matched game window (docs/player_notes.md,
+# piece C): the end-of-session recap asks whether that PROCESS is still
+# alive - never whether it has focus, so alt-tabbing to Discord or a browser
+# mid-play is not "the game is gone". Set by `_match_foreground_window()` on
+# every match; read by main.py's recap trigger.
+_LAST_GAME_PROCESS: dict = {"game": None, "pid": None, "exe": None}
+
+
+def _note_game_process(game: str, pid: int, exe_path: Path | None) -> None:
+    _LAST_GAME_PROCESS.update(game=game, pid=pid, exe=exe_path)
+
+
+def last_game_process() -> tuple[str, int, Path | None] | None:
+    """`(game, pid, exe_path)` of the most recently matched game window, or
+    None before the first match."""
+    g = _LAST_GAME_PROCESS
+    return (g["game"], g["pid"], g["exe"]) if g["game"] and g["pid"] else None
+
+
+def game_process_alive(pid: int | None, exe_path: Path | None) -> bool:
+    """True while `pid` still runs the executable it ran when the game was
+    matched (a reused pid with another exe counts as gone). Opens the process
+    the same limited way `_process_image_path()` does - works on elevated
+    games too. No pid = nothing to watch = never "alive"."""
+    if not pid:
+        return False
+    path = _process_image_path(pid)
+    if path is None:
+        return False
+    return exe_path is None or str(path).lower() == str(exe_path).lower()
+
+
 def _match_foreground_window(aliases_path: Path) -> tuple[int, str] | None:
     """The shared lookup behind `detect_game()` (name only) and
     `get_foreground_game_window_rect()` (also needs the hwnd, to crop
@@ -894,6 +926,10 @@ def _match_foreground_window(aliases_path: Path) -> tuple[int, str] | None:
     except Exception:  # noqa: BLE001 - pywin32 missing, no window, ...
         return None
 
+    def hit(matched: str) -> tuple[int, str]:
+        _note_game_process(matched, pid, exe_path)  # the recap trigger watches this process
+        return (hwnd, matched)
+
     aliases = load_game_aliases(aliases_path)
     process_stem = _normalize_exe_stem(process_name)
     title_lower = title.lower()
@@ -904,14 +940,14 @@ def _match_foreground_window(aliases_path: Path) -> tuple[int, str] | None:
             if not canonical:
                 continue
             if any(_normalize_exe_stem(p) == process_stem for p in entry.get("process_names", [])):
-                return hwnd, canonical
+                return hit(canonical)
 
     for entry in aliases:
         canonical = entry.get("canonical_game")
         if not canonical:
             continue
         if any(sub.lower() in title_lower for sub in entry.get("window_title_substrings", [])):
-            return hwnd, canonical
+            return hit(canonical)
 
     # Pass 3 (2026-09-24, see launcher_lookup.py): neither a curated exe nor
     # a curated title matched. Before giving up, ask the game's OWN launcher
@@ -925,19 +961,19 @@ def _match_foreground_window(aliases_path: Path) -> tuple[int, str] | None:
     # why that's safe.
     launcher_name = launcher_lookup.launcher_game_name(exe_path)
     if launcher_name:
-        return hwnd, launcher_name
+        return hit(launcher_name)
 
     # Pass 4 (2026-10-06): the name this player gave by voice for this exe.
     remembered = remembered_game_for(exe_path)
     if remembered:
-        return hwnd, remembered
+        return hit(remembered)
 
     # Pass 5 (2026-10-06): the exe's own product name - only for a window
     # that fills its monitor and an exe that isn't a known non-game.
     if not _not_a_game_exe(exe_path) and _window_fills_monitor(hwnd):
         name = clean_window_title(title) or exe_product_name(exe_path)
         if name:
-            return hwnd, name
+            return hit(name)
 
     return None
 

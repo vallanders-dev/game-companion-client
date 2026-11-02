@@ -76,7 +76,9 @@ from client.gamepad import GamepadWatcher, describe_combo
 from client.gui.client import ROOT, HudClient
 from client.listen import play_confirm_tone, play_stop_tone, preload_vad_model, record_until_silence
 from client.net import AuthError, LiveTranscript, ServerError, ServerSession
+from client.recap_trigger import RecapTrigger
 from client.speech import AudioOut
+from client.launcher import install_launcher, relaunch_as_ombri, windowed_python
 from client.updater import check_for_update
 from client.voice_commands import VoiceListener
 
@@ -496,6 +498,85 @@ def _remember_note(session: ServerSession, settings, game: str, barge: "BargeInW
     return None
 
 
+def _offer_recap(session: ServerSession, settings, game: str, barge: "BargeInWatcher | None"):
+    """The end-of-session recap (docs/player_notes.md, piece C): the game's
+    process is gone, so ask the server whether there is anything from this
+    session worth keeping. The server speaks the offer and runs the F6
+    confirm round (`ServerSession.recap()`); `recap_nothing` is silence.
+    Returns a trigger pressed during the closing line, like `_remember_note`."""
+    print(t("recap_offer", game=game))
+    turn_id = uuid.uuid4().hex
+    cancel = threading.Event()
+    audio_out = AudioOut()
+    try:
+        audio_out.open()
+    except Exception as exc:  # noqa: BLE001
+        print(t("no_audio_out", error=exc))
+
+    def record_reply() -> bytes | None:
+        print(t("answer_yes_no"))
+        _UI.state("ouvindo")
+        reply = _record(settings)
+        _UI.state("pensando")
+        return reply
+
+    def on_audio(pcm: bytes, _turn_seq: int) -> None:
+        _UI.state("falando")
+        audio_out.write(pcm, cancel)
+
+    try:
+        result = session.recap(turn_id, game, record_reply=record_reply, cancel=cancel,
+                               on_audio=on_audio, on_usage=_UI.usage)
+    except ServerError as exc:
+        print(t("error", error=exc))
+        _UI.state("idle")
+        _UI.connection("offline")
+        audio_out.close()
+        return None
+    audio_out.close(drain=True)
+    _UI.state("idle")
+    _UI.connection("ok")
+
+    outcome = result.get("outcome")
+    if outcome == "note_saved":
+        print(t("note_saved", text=result.get("answer_text", "")))
+        play_confirm_tone()
+        return _speak_line("note_saved", barge, fallback_tone=False)
+    if outcome == "note_discarded":
+        print(t("note_discarded", reason=result.get("stats", {}).get("reason", "")))
+        play_stop_tone()
+    elif outcome == "recap_nothing":
+        telemetry(t("recap_nothing"))
+    elif outcome == "cap_reached":
+        print(t("note_cap", text=texts.spoken("cap_reached")))
+        return _speak_line("cap_reached", barge)
+    elif outcome == "note_save_failed":
+        print(t("error", error=result.get("answer_text") or outcome))
+    else:
+        telemetry(f"  (resultado inesperado: {outcome})")
+    return None
+
+
+def _notes_command(cmd: str) -> None:
+    """"Minhas notas" in the window: list, or delete one then list again.
+    REST next to the WebSocket (`ServerSession.list_notes/delete_note`), on
+    its own thread so the UI reader thread never waits on the network."""
+    session = _SESSION
+    if session is None:
+        _UI.notes([], error="offline")
+        return
+
+    def work() -> None:
+        try:
+            if cmd.startswith("notes_delete:"):
+                session.delete_note(cmd.split(":", 1)[1])
+            _UI.notes(session.list_notes())
+        except ServerError as exc:
+            _UI.notes([], error=str(exc))
+
+    threading.Thread(target=work, name="notes-rest", daemon=True).start()
+
+
 def _ask_for_token(reason: str) -> bool:
     """Opens the first-launch token window (its own process - client.main
     never imports Qt) and waits for it. True once a token the server
@@ -555,9 +636,14 @@ def cmd_ask(_args: argparse.Namespace) -> int:
     _UI.connection("ok")
     # Reconnects in the background whenever the connection drops, so a
     # question never waits for it (and the window's status stays true).
-    session.start_keepalive(on_status=lambda status: _UI.connection("ok" if status == "ok" else "offline"))
+    def on_keepalive(status: str) -> None:
+        _UI.connection("ok" if status == "ok" else "offline")
+        if status == "ok":
+            _UI.features(session.features)  # a reconnect may have landed on an updated server
+    session.start_keepalive(on_status=on_keepalive)
     if session.usage:
         _UI.usage(*session.usage)
+    _UI.features(session.features)  # "notes" shows the "Minhas notas" page
 
     preload_vad_model()
     if getattr(settings, "smart_turn", True):
@@ -604,6 +690,11 @@ def cmd_ask(_args: argparse.Namespace) -> int:
     pending_fired = None
     follow_up_wav: bytes | None = None
     follow_up_live: str | None = None  # the follow-up's words, heard live
+    # The end-of-session recap (docs/player_notes.md, piece C): watches the
+    # game's PROCESS, offers once when it has been gone for 20 s, and only
+    # when this server has the turn ("recap" in auth_ok.features).
+    recap = RecapTrigger()
+    recap_due = False
 
     while True:
         # A voice (and language) picked in the settings window while this
@@ -629,6 +720,9 @@ def cmd_ask(_args: argparse.Namespace) -> int:
                 _announce_game(settings, detected)
             active_game = detected
             game = active_game
+            proc = capture.last_game_process()
+            if proc and proc[0] == detected:
+                recap.seen(detected, proc[1], proc[2])
         elif active_game:
             game = active_game
         else:
@@ -637,6 +731,9 @@ def cmd_ask(_args: argparse.Namespace) -> int:
                 active_game = found
                 game = found
                 _announce_game(settings, found)
+                proc = capture.last_game_process()
+                if proc and proc[0] == found:
+                    recap.seen(found, proc[1], proc[2])
             elif fired is None:
                 continue  # the settings window changed the voice: applied at the top
             else:
@@ -645,6 +742,8 @@ def cmd_ask(_args: argparse.Namespace) -> int:
                     active_game = resolved
                     game = resolved
                     _UI.game(resolved)
+                    if resolved != recap.game:
+                        recap.forget()  # named by voice: no matched window to watch yet
                     print(t("game_by_voice_free" if is_freeform else "game_by_voice", name=resolved))
                     # Next time this game is detected without asking (this PC
                     # only; capture.py pass 4).
@@ -658,10 +757,31 @@ def cmd_ask(_args: argparse.Namespace) -> int:
                     prompt_scene(all_triggers, t("retry_prompt"))
                     continue
 
+        if recap_due:
+            recap_due = False
+            if _PAUSED.is_set():
+                recap.skip()
+            elif session.supports("recap"):
+                pending_fired = _offer_recap(session, settings, recap.game or active_game, barge)
+
         def _foreground_game_changed() -> bool:
             # Also "changed": a new voice/language saved in the settings
             # window - the loop's top applies it before the next question.
-            return _voice_setting_changed() or detect_game(settings.game_aliases_path) not in (None, active_game)
+            nonlocal recap_due
+            if _voice_setting_changed():
+                return True
+            seen_now = detect_game(settings.game_aliases_path)
+            if seen_now:
+                proc = capture.last_game_process()
+                if proc and proc[0] == seen_now:
+                    recap.seen(seen_now, proc[1], proc[2])
+            if seen_now not in (None, active_game):
+                return True
+            # The game's process, not its focus: alt-tabbing to Discord is not "gone".
+            if recap.watching() and recap.tick(capture.game_process_alive(recap.pid, recap.exe)):
+                recap_due = True
+                return True  # leave the wait; the top of the loop makes the offer
+            return False
 
         scene_prompt = t("scene_prompt", ask=_fmt(manager.hotkey), note=_fmt(remember_manager.hotkey))
         if _VOICE is not None and pending_fired is _VOICE.shush:
@@ -696,6 +816,7 @@ def cmd_ask(_args: argparse.Namespace) -> int:
                 session.close()
                 return 0
             active_game = new_game
+            recap.forget()  # typed name: no window to watch, no recap for it
             continue
 
         if fired is remember_manager:
@@ -1005,16 +1126,15 @@ def _on_ui_command(cmd: str) -> None:
         _restart_for_update()
     elif cmd in ("survey_open", "survey_later"):
         _answer_survey(cmd == "survey_open")
+    elif cmd == "notes_list" or cmd.startswith("notes_delete:"):
+        _notes_command(cmd)
 
 
 def _restart_for_update() -> None:
     """The update notice's button: start a fresh copy, which applies the
     update at startup (check_for_update) and then waits for this copy's
     single-instance lock (`--relaunched`), and step aside for it."""
-    exe = sys.executable
-    windowed = os.path.join(os.path.dirname(exe), "pythonw.exe")
-    if os.name == "nt" and os.path.exists(windowed):
-        exe = windowed
+    exe = windowed_python()
     flags = 0x00000008 | 0x00000200 if os.name == "nt" else 0  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
     try:
         subprocess.Popen([exe, "-m", "client.main", "--relaunched"], cwd=ROOT, creationflags=flags,
@@ -1154,10 +1274,7 @@ def _relaunch_as_admin() -> None:
         return
     import ctypes
 
-    exe = sys.executable
-    windowed = os.path.join(os.path.dirname(exe), "pythonw.exe")
-    if os.path.exists(windowed):
-        exe = windowed
+    exe = windowed_python()
     ok = ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, "-m client.main --relaunched", str(ROOT), 1)
     if ok > 32:  # <= 32 is an error, including the user saying no to the prompt
         if _SESSION is not None:
@@ -1251,14 +1368,18 @@ def _tidy_shortcuts() -> None:
     said no, or deleted it, doesn't get it back). The old "Parça -
     Configurações" icon (v0.1.6-v0.1.7) is removed. Both installs are
     covered: Parca-Setup.exe's runtime/ and instalar-parca.cmd's .venv.
-    They launch pythonw.exe (no console) with the orb icon. Best-effort and
-    silent; recorded in settings.json."""
+    They launch pythonw.exe (no console) with the orb icon - or, once
+    runtime/Ombri.exe is in place (client.launcher), that one, so Task
+    Manager says Ombri: a second pass (shortcuts_v5) repoints them. Best-effort
+    and silent; recorded in settings.json."""
     from client.config import _read_user_settings, save_user_settings
     from client.updater import INSTALL_MARKER, REPO_ROOT
 
     pythonw = next((p for p in (REPO_ROOT / "runtime" / "pythonw.exe",
                                 REPO_ROOT / ".venv" / "Scripts" / "pythonw.exe") if p.exists()), None)
-    if not INSTALL_MARKER.exists() or pythonw is None or _read_user_settings().get("shortcuts_v4"):
+    launcher = install_launcher() if pythonw is not None else None
+    done_key = "shortcuts_v5" if launcher else "shortcuts_v4"
+    if not INSTALL_MARKER.exists() or pythonw is None or _read_user_settings().get(done_key):
         return
     script = (
         "$w = New-Object -ComObject WScript.Shell; "
@@ -1276,14 +1397,14 @@ def _tidy_shortcuts() -> None:
         done = subprocess.run(
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
             env=dict(os.environ, PARCA_LNK=LAUNCH_SHORTCUT_NAME, PARCA_OLD_LNK=OLD_LAUNCH_SHORTCUT_NAME,
-                     PARCA_SET_LNK=SETTINGS_SHORTCUT_NAME, PARCA_PYW=str(pythonw), PARCA_HOME=str(REPO_ROOT),
+                     PARCA_SET_LNK=SETTINGS_SHORTCUT_NAME, PARCA_PYW=str(launcher or pythonw), PARCA_HOME=str(REPO_ROOT),
                      PARCA_ICO=str(ICON_PATH)),
             capture_output=True, timeout=20, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         ).returncode == 0
     except Exception:  # noqa: BLE001
         done = False
     if done:
-        save_user_settings(shortcuts_v4=True)
+        save_user_settings(**{done_key: True})
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1292,6 +1413,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="open the settings window (language, voice, token) and exit")
     ap.add_argument("--relaunched", action="store_true", help=argparse.SUPPRESS)  # elevated restart
     args = ap.parse_args(argv)
+    if relaunch_as_ombri(sys.argv[1:] if argv is None else argv):
+        return 0  # that copy runs as Ombri.exe; before the log, so it keeps parca.log
     _log_without_console()
     if args.settings:
         # Its own process, like at first launch; a running copy picks the new

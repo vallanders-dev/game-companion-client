@@ -207,6 +207,12 @@ class ServerSession:
         # None when the server doesn't send it.
         self.usage: tuple[int, int] | None = None
         self.announce: dict | None = None   # the server's current announcement, if any
+        # What this server can do beyond the base protocol (auth_ok.features,
+        # servers from 2026-10-31 on; empty for older ones). The app shows
+        # "Minhas notas" only with "notes" and sends a recap turn only with
+        # "recap" - an older server silently drops a turn kind it doesn't
+        # know, so guessing would mean waiting for nothing.
+        self.features: frozenset[str] = frozenset()
         self._ws = None
         self._io_lock = threading.RLock()  # requests vs the keepalive watcher
         self._keepalive: threading.Thread | None = None
@@ -251,7 +257,59 @@ class ServerSession:
         self.announce = announce if isinstance(announce, dict) and announce.get("id") else None
         survey = msg.get("survey")  # the personality test invite (0.1.20+)
         self.survey = survey if isinstance(survey, dict) and survey.get("id") and survey.get("code") else None
+        features = msg.get("features")
+        self.features = frozenset(str(f) for f in features) if isinstance(features, list) else frozenset()
         return self.display_name
+
+    def supports(self, feature: str) -> bool:
+        return feature in self.features
+
+    @property
+    def http_base(self) -> str:
+        """The REST side of the address that answered (wss://host/v1/ws ->
+        https://host), for the notes endpoints."""
+        url = self.server_url
+        for ws_scheme, http_scheme in (("wss://", "https://"), ("ws://", "http://")):
+            if url.startswith(ws_scheme):
+                url = http_scheme + url[len(ws_scheme):]
+                break
+        return url.split("/v1/", 1)[0].rstrip("/")
+
+    # -- my notes (docs/player_notes.md): plain REST next to the WebSocket ----
+    def _rest(self, method: str, path: str, timeout: float = 10.0) -> dict:
+        import urllib.error
+        import urllib.request
+
+        req = urllib.request.Request(self.http_base + path, method=method,
+                                     headers={"Authorization": f"Bearer {self.token}",
+                                              "X-Parca-Version": _app_version()})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - our own server
+                return json.loads(resp.read().decode("utf-8") or "{}")
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401:
+                raise AuthError("servidor recusou o token") from exc
+            raise ServerError(f"servidor respondeu {exc.code}") from exc
+        except Exception as exc:  # noqa: BLE001 - DNS, timeout, refused
+            raise ServerError(f"não consegui falar com o servidor: {exc}") from exc
+
+    def list_notes(self) -> list[dict]:
+        """This tester's own notes, newest first (`GET /v1/notes`)."""
+        notes = self._rest("GET", "/v1/notes").get("notes", [])
+        return [n for n in notes if isinstance(n, dict) and n.get("id")]
+
+    def delete_note(self, note_id: str) -> bool:
+        """`DELETE /v1/notes/{id}`. True when removed; False when the server
+        no longer had it (already gone - the same end state)."""
+        from urllib.parse import quote
+
+        try:
+            self._rest("DELETE", "/v1/notes/" + quote(str(note_id), safe=""))
+        except ServerError as exc:
+            if "404" in str(exc):
+                return False
+            raise
+        return True
 
     def connected(self) -> bool:
         """True while the WebSocket is open (the library's own pings mark a
@@ -525,7 +583,34 @@ class ServerSession:
         if note_wav is not None:
             frames.append(note_wav)
         self._send_opening(frames)
+        return self._confirm_rounds(turn_id, record_reply, cancel, on_state, on_audio, on_usage)
 
+    @_exclusive
+    def recap(
+        self,
+        turn_id: str,
+        game: str,
+        *,
+        record_reply,
+        cancel: threading.Event | None = None,
+        on_state=None,
+        on_audio=None,
+        on_usage=None,
+    ) -> dict:
+        """The end-of-session recap (docs/player_notes.md, piece B/C): tells
+        the server the game is gone; the server either answers at once with
+        `recap_nothing` (nothing in the session memory) or runs the same
+        confirm rounds as F6 - its offer plays, `on_state("ouvindo")` is the
+        cue to `record_reply()`, a clear yes saves. Only call when
+        `supports("recap")`: an older server never answers this kind."""
+        msg = {"type": "turn_start", "turn_id": turn_id, "kind": "recap", "game": game, **self._voice_field()}
+        self._send_opening([json.dumps(msg)])
+        return self._confirm_rounds(turn_id, record_reply, cancel, on_state, on_audio, on_usage)
+
+    def _confirm_rounds(self, turn_id: str, record_reply, cancel, on_state, on_audio, on_usage) -> dict:
+        """The multi-round half shared by `remember()` and `recap()`: play
+        what the server sends, record a reply at each `ouvindo`, return the
+        `turn_result`."""
         cancel_sent = False
         while True:
             if cancel is not None and cancel.is_set() and not cancel_sent:

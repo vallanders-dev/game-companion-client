@@ -46,6 +46,13 @@ UI = {
         "survey_yes": "Quero participar", "survey_no": "Agora não",
         "offline_title": "Sem conexão com o servidor",
         "offline_body": "O Ombri tenta de novo sozinho. Confira sua internet.",
+        # "Minhas notas" (docs/player_notes.md, piece C)
+        "notes_button": "Minhas notas", "notes_title": "Minhas notas", "notes_back": "Voltar",
+        "notes_loading": "Carregando…", "notes_count": "{n} nota(s), da mais nova pra mais antiga",
+        "notes_empty": "Nenhuma nota ainda.\nSegure {note}, fale a nota e confirme com \"sim\".",
+        "notes_error": "Não consegui carregar suas notas. Tenta de novo daqui a pouco.",
+        "notes_delete": "Apagar", "notes_confirm": "Apagar esta nota?", "notes_yes": "Sim", "notes_no": "Não",
+        "notes_deleting": "Apagando…", "notes_recap": "resumo da sessão",
     },
     "en": {
         "beta": "beta",
@@ -88,6 +95,12 @@ UI = {
         "survey_yes": "I'm in", "survey_no": "Not now",
         "offline_title": "No connection to the server",
         "offline_body": "Ombri keeps retrying on its own. Check your internet.",
+        "notes_button": "My notes", "notes_title": "My notes", "notes_back": "Back",
+        "notes_loading": "Loading…", "notes_count": "{n} note(s), newest first",
+        "notes_empty": "No notes yet.\nHold {note}, say the note and confirm with \"yes\".",
+        "notes_error": "Couldn't load your notes. Try again in a moment.",
+        "notes_delete": "Delete", "notes_confirm": "Delete this note?", "notes_yes": "Yes", "notes_no": "No",
+        "notes_deleting": "Deleting…", "notes_recap": "session recap",
     },
 }
 

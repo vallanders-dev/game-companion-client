@@ -96,7 +96,7 @@ class ClientSettings:
     game_detect_poll_seconds: float
     game_voice_match_min_ratio: float
     # client/voices.py key: the voice AND the conversation's language.
-    voice: str = "raquel"
+    voice: str = "yuri"
     # End-of-turn model (client/turn_detect.py): stop listening when the
     # sentence is finished instead of after mic_silence_hang. SMART_TURN=false = the fixed wait.
     smart_turn: bool = True

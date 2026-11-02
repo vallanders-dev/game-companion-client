@@ -28,9 +28,12 @@ stdin, JSON lines from the client:
   {"type": "paused", "on": bool}
   {"type": "notice", "kind": "admin|offline|update|announce|survey", "version"?, "text"?}
   {"type": "show"}
+  {"type": "features", "list": [str]}            # what the server can do ("notes", "recap")
+  {"type": "notes", "items": [{id, game, note, created, source}], "error": str}
 stdout, JSON lines back to the client (the ONLY thing written there - every
 diagnostic print goes to stderr, i.e. output/overlay.log):
-  {"cmd": "quit" | "pause" | "resume" | "settings" | "relaunch_admin" | "survey_open" | "survey_later"}
+  {"cmd": "quit" | "pause" | "resume" | "settings" | "relaunch_admin" | "survey_open" | "survey_later"
+          | "notes_list" | "notes_delete:<id>"}
 Exits on stdin EOF, i.e. whenever the client exits.
 """
 from __future__ import annotations
@@ -244,6 +247,10 @@ class Ui:
 
         self.window.settings_requested.connect(lambda: _send("settings"))
         self.window.hidden_to_tray.connect(self._hidden)
+        # "Minhas notas" (docs/player_notes.md): the window asks, main.py
+        # answers with a "notes" message after calling the server.
+        self.window.notes_requested.connect(lambda: _send("notes_list"))
+        self.window.note_delete_requested.connect(lambda note_id: _send("notes_delete:" + note_id))
 
         self.tray = QSystemTrayIcon(QIcon(QPixmap.fromImage(sphere_image(64))))
         self.tray.setToolTip("Ombri")
@@ -351,6 +358,10 @@ class Ui:
             self._notice(str(msg.get("kind", "")), msg)
         elif kind == "show":
             self.window.show_and_raise()
+        elif kind == "features":
+            self.window.set_features(msg.get("list") or [])
+        elif kind == "notes":
+            self.window.set_notes(msg.get("items") or [], str(msg.get("error") or ""))
         elif kind == "echo_cmd":
             # Test hook (eval/client_ui_harness.py): proves the command
             # channel end to end without a mouse. The client never sends it.
