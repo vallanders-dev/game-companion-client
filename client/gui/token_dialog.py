@@ -9,9 +9,9 @@ The token is checked against the real server before it's saved, so a typo
 or a revoked token is caught here, with a plain explanation, not later as a
 cryptic connection error.
 
-Language and voice (2026-09-27): the language list picks Portuguese or
-English (the whole conversation - speech recognition, answers, spoken
-lines, console text); the voice list shows that language's voices
+Language and voice (2026-09-27): the language list picks Portuguese,
+English or Spanish (2026-11-03) - the whole conversation: speech
+recognition, answers, spoken lines, console text; the voice list shows that language's voices
 (client/voices.py) and "Ouvir"/"Listen" plays the voice's baked sample line.
 The window's own text follows the chosen language. On a first launch the
 language starts from Windows' display language; otherwise from the saved
@@ -47,7 +47,7 @@ REASONS = ("missing", "rejected", "settings")
 UI = {
     "pt": {
         "title": "Ombri — acesso ao beta",
-        "missing": "Cole abaixo o token de testador que você recebeu e escolha a voz do Ombri.",
+        "missing": "Cole abaixo o token de testador que você recebeu e escolha a voz do Ombri. O Ombri é só para maiores de 18 anos.",
         "rejected": "O servidor não aceitou o token salvo. Cole um token válido abaixo.",
         "settings": "Escolha o idioma e a voz do Ombri. Deixe o token em branco pra manter o atual.",
         "language": "Idioma",
@@ -75,6 +75,8 @@ UI = {
         "duck_level": "O jogo fica em {n}% enquanto eu falo",
         "rec": "Gravações",
         "rec_on": "Aparecer nas gravações e lives (OBS, Discord)",
+        "history": "Relatório",
+        "history_on": "Usar o que joguei na Steam e no Minecraft no \"Ombri, acorda!\"",
         "follow": "Conversa",
         "follow_on": "Continuar ouvindo depois que eu respondo",
         "vcmd": "Comandos de voz",
@@ -82,7 +84,7 @@ UI = {
     },
     "en": {
         "title": "Ombri — beta access",
-        "missing": "Paste the tester token you received below and choose Ombri's voice.",
+        "missing": "Paste the tester token you received below and choose Ombri's voice. Ombri is only for people aged 18 and over.",
         "rejected": "The server didn't accept the saved token. Paste a valid token below.",
         "settings": "Choose Ombri's language and voice. Leave the token empty to keep the current one.",
         "language": "Language",
@@ -110,10 +112,50 @@ UI = {
         "duck_level": "The game plays at {n}% while I talk",
         "rec": "Recordings",
         "rec_on": "Show me in recordings and streams (OBS, Discord)",
+        "history": "Report",
+        "history_on": "Use what I play on Steam and in Minecraft in \"Ombri, wake up!\"",
         "follow": "Conversation",
         "follow_on": "Keep listening after I answer",
         "vcmd": "Voice commands",
         "vcmd_on": "Listen for \"Hey Ombri\" and \"stop\" (all on your PC)",
+    },
+    # Spanish: neutral Latin American "tú" (docs/spanish.md §5).
+    "es": {
+        "title": "Ombri — acceso al beta",
+        "missing": "Pega abajo el token de tester que recibiste y elige la voz de Ombri. Ombri es solo para mayores de 18 años.",
+        "rejected": "El servidor no aceptó el token guardado. Pega un token válido abajo.",
+        "settings": "Elige el idioma y la voz de Ombri. Deja el token en blanco para mantener el actual.",
+        "language": "Idioma",
+        "voice": "Voz",
+        "listen": "Escuchar",
+        "token": "Token",
+        "token_placeholder": "tu token de tester",
+        "token_keep": "(token guardado - déjalo en blanco para mantenerlo)",
+        "cancel": "Cancelar",
+        "connect": "Conectar",
+        "save": "Guardar",
+        "need_token": "Pega el token primero.",
+        "checking": "Verificando con el servidor...",
+        "connected": "Conectado como {name}. ¡A jugar!",
+        "saved": "¡Guardado! Vale a partir de la próxima pregunta.",
+        "rejected_status": "Ese token no fue aceptado. Revisa que lo hayas copiado entero.",
+        "unreachable": "No pude comunicarme con el servidor. Revisa tu internet e inténtalo de nuevo.",
+        "remembered": "Juegos recordados",
+        "remembered_count": "{n} juego(s) que nombraste por voz",
+        "remembered_none": "ninguno",
+        "forget": "Olvidar",
+        "forgotten": "Olvidados. La próxima vez que uno de esos juegos se abra, Ombri pregunta el nombre de nuevo.",
+        "duck": "Volumen del juego",
+        "duck_on": "Bajar el juego cuando hablo",
+        "duck_level": "El juego queda al {n}% mientras hablo",
+        "rec": "Grabaciones",
+        "rec_on": "Aparecer en grabaciones y transmisiones (OBS, Discord)",
+        "history": "Informe",
+        "history_on": "Usar lo que juego en Steam y Minecraft en \"Ombri, despierta\"",
+        "follow": "Conversación",
+        "follow_on": "Seguir escuchando después de responder",
+        "vcmd": "Comandos de voz",
+        "vcmd_on": "Escuchar \"Oye, Ombri\" y \"basta\" (todo en tu PC)",
     },
 }
 
@@ -155,15 +197,24 @@ def clean_token(raw: str) -> str:
     return re.sub(r"\s+", "", text)
 
 
+# Windows primary language ids -> Ombri's language (anything else: English).
+_WINDOWS_LANGUAGES = {0x16: "pt", 0x0A: "es"}  # LANG_PORTUGUESE, LANG_SPANISH
+
+
 def windows_language() -> str:
-    """"pt" when Windows' display language is Portuguese, else "en"."""
+    """"pt" / "es" when Windows' display language is Portuguese / Spanish,
+    else "en"."""
     try:
         import ctypes
 
         langid = ctypes.windll.kernel32.GetUserDefaultUILanguage()
-        return "pt" if (langid & 0x3FF) == 0x16 else "en"  # LANG_PORTUGUESE
+        return language_for_langid(langid)
     except Exception:  # noqa: BLE001
         return "pt"
+
+
+def language_for_langid(langid: int) -> str:
+    return _WINDOWS_LANGUAGES.get(langid & 0x3FF, "en")
 
 
 class TokenDialog(QDialog):
@@ -227,6 +278,15 @@ class TokenDialog(QDialog):
         self.rec_box = QCheckBox()
         self.rec_box.setChecked(load_show_in_recordings())
         self.rec_box.setFont(body_font(QFont.Weight.Medium, 10.5))
+        # The morning report's play history (client/play_history.py). Saved only if
+        # changed here: leaving it alone must not read as the player's "no".
+        from client.config import _read_user_settings
+        self.history_was_on = _read_user_settings().get("play_history") is True
+        self.history_label = QLabel()
+        self.history_label.setFont(body_font(QFont.Weight.DemiBold, 10))
+        self.history_box = QCheckBox()
+        self.history_box.setChecked(self.history_was_on)
+        self.history_box.setFont(body_font(QFont.Weight.Medium, 10.5))
         # The follow-up window (client/main.py) - settings only.
         self.follow_label = QLabel()
         self.follow_label.setFont(body_font(QFont.Weight.DemiBold, 10))
@@ -281,6 +341,8 @@ class TokenDialog(QDialog):
             grid.addWidget(self.follow_box, 8, 1, 1, 2)
             grid.addWidget(self.vcmd_label, 9, 0)
             grid.addWidget(self.voice_cmd_box, 9, 1, 1, 2)
+            grid.addWidget(self.history_label, 10, 0)
+            grid.addWidget(self.history_box, 10, 1, 1, 2)
         grid.setColumnStretch(1, 1)
 
         buttons = QHBoxLayout()
@@ -341,6 +403,8 @@ class TokenDialog(QDialog):
         self.follow_box.setText(self._s("follow_on"))
         self.vcmd_label.setText(self._s("vcmd"))
         self.voice_cmd_box.setText(self._s("vcmd_on"))
+        self.history_label.setText(self._s("history"))
+        self.history_box.setText(self._s("history_on"))
         self._duck_changed()
 
     def _duck_changed(self, *_args) -> None:
@@ -352,9 +416,12 @@ class TokenDialog(QDialog):
     def _duck_fields(self) -> dict:
         if self.reason != "settings":
             return {}
-        return {"duck_game": self.duck_box.isChecked(), "duck_level": self.duck_slider.value() / 10,
-                "show_in_recordings": self.rec_box.isChecked(), "follow_up": self.follow_box.isChecked(),
-                "voice_commands": self.voice_cmd_box.isChecked()}
+        fields = {"duck_game": self.duck_box.isChecked(), "duck_level": self.duck_slider.value() / 10,
+                  "show_in_recordings": self.rec_box.isChecked(), "follow_up": self.follow_box.isChecked(),
+                  "voice_commands": self.voice_cmd_box.isChecked()}
+        if self.history_box.isChecked() != self.history_was_on:
+            fields["play_history"] = self.history_box.isChecked()
+        return fields
 
     def _forget_games(self) -> None:
         capture.forget_remembered_games()

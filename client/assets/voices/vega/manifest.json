@@ -1,0 +1,19 @@
+{
+  "filler_1": "Déjame ver...",
+  "filler_2": "Un segundo...",
+  "filler_3": "Verificando...",
+  "filler_4": "Mmm, déjame mirar...",
+  "cap_reached": "Se alcanzó el límite diario de llamadas de la prueba. Mañana se reinicia solo; hasta entonces no puedo responder.",
+  "game_ask": "No identifiqué el juego automáticamente. ¿Qué juego estás jugando?",
+  "game_reask": "No lo reconocí. ¿Qué juego estás jugando?",
+  "game_unresolved": "No pude identificar el juego por voz. Presiona F8 o F6 para intentarlo de nuevo.",
+  "game_none": "Perfecto, sin juego entonces. No pregunto más.",
+  "note_saved": "Anotado.",
+  "game_needs_admin": "Atención: el juego está corriendo como administrador, así que Windows no me deja oír las teclas. Cierra Ombri y ábrelo de nuevo con el botón derecho en el ícono, en Ejecutar como administrador.",
+  "web_search": "Déjame buscarlo rapidito.",
+  "web_search_still": "Ya casi, un momento más.",
+  "already_running": "Ya estoy abierto en otra ventana. Cierra esa antes de abrirme de nuevo.",
+  "sample": "¡Hola! Soy Ombri. Solo presiona F8 y pregúntame lo que quieras sobre tu juego.",
+  "no_notes": "Ahora mismo no tengo una respuesta confiable para eso. Prueba preguntarlo de otra forma, o cuéntame la respuesta con F6 y la recuerdo para la próxima.",
+  "closing_ack": "¡Perfecto! Cualquier cosa, me llamas."
+}

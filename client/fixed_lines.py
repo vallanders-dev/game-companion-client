@@ -5,8 +5,8 @@ reads these texts to synthesize the shipped WAVs, and `client/fixed_audio.py`
 plays them back. This process has no ElevenLabs key, so a line that isn't
 baked into an asset can only be printed, never spoken.
 
-Since 2026-09-27 every line exists per LANGUAGE (pt / en) and is baked per
-VOICE (client/voices.py): `client/assets/voices/<voice>/<line>.wav`, with a
+Since 2026-09-27 every line exists per LANGUAGE (pt / en, es since
+2026-11-03 - docs/spanish.md §4.C) and is baked per VOICE (client/voices.py): `client/assets/voices/<voice>/<line>.wav`, with a
 `manifest.json` per voice folder recording the text each WAV was baked
 from (a changed text re-bakes on the next run).
 
@@ -30,6 +30,7 @@ MANIFEST_NAME = "manifest.json"
 FILLER_LINES = {
     "pt": ("Deixa eu ver...", "Só um instante...", "Verificando...", "Hmm, deixa eu olhar aqui..."),
     "en": ("Let me see...", "One sec...", "Checking...", "Hmm, let me look..."),
+    "es": ("Déjame ver...", "Un segundo...", "Verificando...", "Mmm, déjame mirar..."),
 }
 
 # A web search takes 3-10 s before a word exists: "web_search" plays as soon
@@ -44,6 +45,9 @@ TEXTS: dict[str, dict[str, str]] = {
         "game_ask": "Não identifiquei o jogo automaticamente. Qual jogo você está jogando?",
         "game_reask": "Não reconheci. Qual jogo você está jogando?",
         "game_unresolved": "Não consegui identificar o jogo por voz. Aperte F8 ou F6 pra tentar de novo.",
+        # The player answered the game question with "none": no more asking
+        # until a game is detected (owner, 2026-11-03).
+        "game_none": "Beleza, sem jogo então. Não pergunto mais.",
         "note_saved": "Anotado.",
         # Spoken once per detected game when the game runs as administrator
         # and the client doesn't - Windows then hides every key press.
@@ -64,6 +68,7 @@ TEXTS: dict[str, dict[str, str]] = {
         "game_ask": "I couldn't detect your game automatically. Which game are you playing?",
         "game_reask": "I didn't recognize that. Which game are you playing?",
         "game_unresolved": "I couldn't identify the game by voice. Press F8 or F6 to try again.",
+        "game_none": "Got it, no game then. I won't ask again.",
         "note_saved": "Noted.",
         "game_needs_admin": "Heads up: your game is running as administrator, so Windows won't let me hear "
                             "your keys. Close Ombri and open it again by right-clicking the icon and "
@@ -72,6 +77,26 @@ TEXTS: dict[str, dict[str, str]] = {
         "web_search_still": "Almost there, just a moment.",
         "already_running": "I'm already open in another window. Close that one before opening me again.",
         "sample": "Hey! I'm Ombri. Just press F8 and ask me anything about your game.",
+    },
+    # Spanish: neutral Latin American "tú" (docs/spanish.md §5); the spoken
+    # register of server/languages.py LANGUAGES["es"]. Baked per voice by the
+    # owner (server/tools/bake_fixed_audio.py); until then a line prints and
+    # the stop tone plays in its place (client/fixed_audio.py).
+    "es": {
+        "cap_reached": "Se alcanzó el límite diario de llamadas de la prueba. "
+                       "Mañana se reinicia solo; hasta entonces no puedo responder.",
+        "game_ask": "No identifiqué el juego automáticamente. ¿Qué juego estás jugando?",
+        "game_reask": "No lo reconocí. ¿Qué juego estás jugando?",
+        "game_unresolved": "No pude identificar el juego por voz. Presiona F8 o F6 para intentarlo de nuevo.",
+        "game_none": "Perfecto, sin juego entonces. No pregunto más.",
+        "note_saved": "Anotado.",
+        "game_needs_admin": "Atención: el juego está corriendo como administrador, así que Windows no me deja "
+                            "oír las teclas. Cierra Ombri y ábrelo de nuevo con el botón derecho en el ícono, en "
+                            "Ejecutar como administrador.",
+        "web_search": "Déjame buscarlo rapidito.",
+        "web_search_still": "Ya casi, un momento más.",
+        "already_running": "Ya estoy abierto en otra ventana. Cierra esa antes de abrirme de nuevo.",
+        "sample": "¡Hola! Soy Ombri. Solo presiona F8 y pregúntame lo que quieras sobre tu juego.",
     },
 }
 

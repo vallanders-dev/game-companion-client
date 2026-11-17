@@ -14,5 +14,6 @@
   "already_running": "Eu já estou rodando em outra janela. Feche aquela antes de me abrir de novo.",
   "sample": "Oi! Eu sou o Ombri. É só apertar F8 e me perguntar o que quiser sobre o seu jogo.",
   "no_notes": "Não consegui uma resposta confiável pra isso agora. Pode tentar de novo com outra pergunta, ou me contar a resposta com F6 que eu guardo pra próxima vez.",
-  "closing_ack": "Beleza! Qualquer coisa, é só chamar."
+  "closing_ack": "Beleza! Qualquer coisa, é só chamar.",
+  "game_none": "Beleza, sem jogo então. Não pergunto mais."
 }

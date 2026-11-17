@@ -17,7 +17,7 @@ import math
 import sys
 
 from PySide6.QtCore import QPointF, Qt
-from PySide6.QtGui import QColor, QImage, QPainter, QPen, QRadialGradient
+from PySide6.QtGui import QBrush, QColor, QConicalGradient, QImage, QPainter, QPainterPath, QPen, QRadialGradient
 
 # State key -> colour. Keys are the client/server state names.
 STATE_COLORS = {
@@ -92,6 +92,81 @@ def draw_sphere(painter: QPainter, center: QPointF, radius: float, color: QColor
         painter.drawEllipse(center, ring_radius, ring_radius)
     painter.restore()
 
+
+HALO_STATES = ("pensando", "pesquisando")
+_HALO_STRANDS = 8
+_HALO_SPECKS = 64
+
+
+def _shift_hue(color: QColor, degrees: float) -> QColor:
+    h, s, v, _a = color.getHsvF()
+    return QColor.fromHsvF(((h if h >= 0 else 0.0) + degrees / 360.0) % 1.0, s, v)
+
+
+def _ring_path(cx: float, cy: float, radius: float, t: float, phase: float, steps: int = 64) -> QPainterPath:
+    path = QPainterPath()
+    for i in range(steps + 1):
+        a = 2 * math.pi * i / steps
+        # Two slow waves travelling round the ring in opposite directions.
+        r = radius * (1.0 + 0.018 * math.sin(3 * a + 1.5 * t + phase) + 0.012 * math.sin(5 * a - 2.1 * t + 1.7 * phase))
+        pt = QPointF(cx + r * math.cos(a), cy + r * math.sin(a))
+        if i == 0:
+            path.moveTo(pt)
+        else:
+            path.lineTo(pt)
+    return path
+
+
+def draw_thinking_halo(painter: QPainter, center: QPointF, radius: float, color: QColor, t: float,
+                       strength: float = 1.0) -> None:
+    """The ring of light around the orb while Ombri thinks (owner's idea,
+    2026-11-04): a soft glow band, a bundle of fine wavy strands whose
+    colour drifts round the ring a little either side of the state colour
+    (so the edge shimmers like oil on water), and dust drifting through it.
+    `radius` is the ring's; `strength` 0..1 fades it in and out. Everything
+    is a function of `t` (no randomness), so a frame redraws identically
+    and the cost is fixed (9 paths of 64 points + 64 dots, ~2 ms at the main
+    window's size, only while thinking)."""
+    if strength <= 0.01:
+        return
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    cx, cy = center.x(), center.y()
+
+    glow = QPen(_alpha(color, 0.10 * strength), radius * 0.16)
+    painter.setPen(glow)
+    painter.drawPath(_ring_path(cx, cy, radius, t, 0.0))
+
+    # The iridescent colour: hue a little off the state colour, rotating slowly.
+    grad = QConicalGradient(center, (t * 25.0) % 360.0)
+    for k, deg in enumerate((0, -40, 25, 50, -20, 0)):
+        grad.setColorAt(k / 5, _alpha(_shift_hue(color, deg), 1.0))
+    for j in range(_HALO_STRANDS):
+        spread = (j - (_HALO_STRANDS - 1) / 2) / _HALO_STRANDS  # -0.5..0.5 across the band
+        r = radius * (1.0 + 0.07 * spread)
+        alpha = (0.22 + 0.25 * (1 - abs(spread) * 2)) * strength
+        pen = QPen(QBrush(grad), 0.9)
+        painter.setOpacity(max(0.0, min(1.0, alpha)))
+        painter.setPen(pen)
+        painter.drawPath(_ring_path(cx, cy, r, t * (0.85 + 0.03 * j), j * 0.9))
+    painter.setOpacity(1.0)
+
+    painter.setPen(Qt.PenStyle.NoPen)
+    for i in range(_HALO_SPECKS):
+        base = i * 2.39996  # golden angle: evenly spread, never in rows
+        a = base + t * (0.18 + 0.12 * ((i * 7) % 5) / 4) * (1 if i % 2 else -1)
+        r = radius * (1.0 + 0.09 * math.sin(i * 1.7 + t * 0.8))
+        twinkle = 0.5 + 0.5 * math.sin(t * (1.8 + (i % 3) * 0.7) + i)
+        size = 0.45 + 0.9 * twinkle
+        painter.setBrush(_alpha(_shift_hue(color, (i % 5 - 2) * 18.0) if i % 4 else QColor(255, 255, 255),
+                                0.8 * twinkle * strength))
+        painter.drawEllipse(QPointF(cx + r * math.cos(a), cy + r * math.sin(a)), size, size)
+    painter.restore()
+
+
+SPEAK_STATES = ("falando",)
 
 def sphere_image(size: int, color: str = ACCENT, glow: float = 0.0) -> QImage:
     """A still sphere filling a square image (tray icon, window icon, .ico)."""

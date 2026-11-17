@@ -59,12 +59,13 @@ from client.capture import (
     capture_game_window_jpeg,
     detect_game,
     foreground_game_needs_admin,
+    is_no_game_answer,
     load_game_aliases,
     prompt_scene,
     remember_game_for_foreground,
     resolve_spoken_game,
 )
-from client import texts, voices
+from client import play_history, texts, voices
 from client.config import (DEFAULT_SERVER_URL, FALLBACK_SERVER_URLS, load_client_settings, load_follow_up_seconds,
                            load_saved_voice, load_voice_commands, save_token)
 from client.fixed_audio import (
@@ -80,7 +81,7 @@ from client.recap_trigger import RecapTrigger
 from client.speech import AudioOut
 from client.launcher import install_launcher, relaunch_as_ombri, windowed_python
 from client.updater import check_for_update
-from client.voice_commands import VoiceListener
+from client.voice_commands import VoiceListener, listener_language
 
 _VERBOSE = True
 # The picked voice (client/voices.py key): which baked lines play, and - via
@@ -96,6 +97,11 @@ _PAUSED = threading.Event()
 # game is usually in front, and opening the main window took its focus.
 _RELAUNCHED = False
 _SESSION: "ServerSession | None" = None
+# A game picked from the list or typed in the window (owner, 2026-11-12): set by
+# the UI's "game_set:<name>" command, taken by the main loop at its next poll.
+_PICKED_GAME: dict = {"name": None}
+_GAME_PICKED = threading.Event()
+GAME_NAME_MAX = 80
 # "Ei, Ombri" / "chega" (client/voice_commands.py): None unless the setting is on.
 _VOICE: "VoiceListener | None" = None
 
@@ -230,7 +236,7 @@ def _sync_voice_listener(triggers: list) -> None:
     global _VOICE
     wanted = load_voice_commands()
     language = voices.get(_voice).language
-    if _VOICE is not None and (not wanted or _VOICE.language != ("en" if language == "en" else "pt")):
+    if _VOICE is not None and (not wanted or _VOICE.language != listener_language(language)):
         _VOICE.stop()
         for trigger in (_VOICE.wake, _VOICE.shush):
             if trigger in triggers:
@@ -295,6 +301,30 @@ def _announce_game(settings, name: str) -> None:
         play_line("game_needs_admin", _voice, fallback_tone=False)
 
 
+# What `resolve_active_game_by_voice()` returns for "I'm not playing anything".
+NO_GAME = "\0no-game"
+
+
+def _adopt_spoken_game(resolved: str, is_freeform: bool, recap: RecapTrigger) -> None:
+    """A game named by voice becomes the active one (shown, printed, and
+    remembered for this PC's foreground window)."""
+    _UI.game(resolved)
+    if resolved != recap.game:
+        recap.forget()  # named by voice: no matched window to watch yet
+    print(t("game_by_voice_free" if is_freeform else "game_by_voice", name=resolved))
+    # Next time this game is detected without asking (this PC
+    # only; capture.py pass 4).
+    remembered = remember_game_for_foreground(resolved)
+    if remembered:
+        telemetry(f"  (lembrado neste PC: {remembered.name} = {resolved})")
+
+
+def _say_no_game() -> None:
+    _UI.game(None)
+    print(f"  {texts.spoken('game_none')}")
+    play_line("game_none", _voice, fallback_tone=False)
+
+
 def resolve_active_game_by_voice(settings, session: ServerSession) -> tuple[str | None, bool]:
     """Network-backed port of `main.resolve_active_game_by_voice()`: STT
     happens on the server (`ServerSession.stt_request()`), but the actual
@@ -302,9 +332,17 @@ def resolve_active_game_by_voice(settings, session: ServerSession) -> tuple[str 
     `capture.resolve_spoken_game()` the single-process app already uses -
     per the approved plan, that logic never moves server-side. Returns
     `(name, is_freeform)`, `(None, False)` if nothing was ever heard at all
-    or the server's cap blocked the STT call."""
+    or the server's cap blocked the STT call, `(NO_GAME, False)` when the
+    player says they aren't playing anything (`capture.is_no_game_answer()`,
+    checked first: on the second try "nenhum" would otherwise become a
+    free-form game called "nenhum")."""
     known = _known_game_names(settings)
+    # The same question as a card (owner, 2026-11-12): answer out loud, or open
+    # the list and pick or type it. A pick made meanwhile wins (the caller checks).
+    _UI.notice("game_ask")
     for attempt in (1, 2):
+        if _GAME_PICKED.is_set():
+            return None, False
         line = "game_ask" if attempt == 1 else "game_reask"
         print(f"  {texts.spoken(line)}")
         # Spoken, not just printed: the player is looking at the game, not
@@ -324,6 +362,8 @@ def resolve_active_game_by_voice(settings, session: ServerSession) -> tuple[str 
             return None, False
         if not text.strip():
             continue
+        if is_no_game_answer(text):
+            return NO_GAME, False
         matched = resolve_spoken_game(text, known, settings.game_voice_match_min_ratio)
         if matched:
             return matched, False
@@ -503,9 +543,27 @@ def _offer_recap(session: ServerSession, settings, game: str, barge: "BargeInWat
     process is gone, so ask the server whether there is anything from this
     session worth keeping. The server speaks the offer and runs the F6
     confirm round (`ServerSession.recap()`); `recap_nothing` is silence.
-    Returns a trigger pressed during the closing line, like `_remember_note`."""
+    Returns a trigger pressed during the closing line, like `_remember_note`.
+
+    Since 2026-11-12 (owner: the spoken offer after every session got
+    annoying), a server with "recap_card" sends the recap as text and it is
+    shown as a card above the tray: nothing spoken, nothing heard, and only
+    the card's "Sim, salva" button saves (`_save_recap_card`)."""
     print(t("recap_offer", game=game))
     turn_id = uuid.uuid4().hex
+    if session.supports("recap_card"):
+        try:
+            result = session.recap(turn_id, game, record_reply=lambda: None, card=True)
+        except ServerError as exc:
+            print(t("error", error=exc))
+            _UI.connection("offline")
+            return None
+        if result.get("outcome") == "recap_card" and result.get("answer_text"):
+            _UI.notice("recap", game=game, text=result["answer_text"],
+                       offer_id=str((result.get("stats") or {}).get("offer_id", "")))
+        else:
+            telemetry(t("recap_nothing"))
+        return None
     cancel = threading.Event()
     audio_out = AudioOut()
     try:
@@ -603,6 +661,7 @@ def cmd_ask(_args: argparse.Namespace) -> int:
     settings = load_client_settings()  # the first-launch window also picks the voice
     _set_voice(settings.voice)
     _start_ui(settings)
+    play_history.start()
     print(t("connecting", url=settings.server_url))
     offline_told = False
     while True:
@@ -687,6 +746,9 @@ def cmd_ask(_args: argparse.Namespace) -> int:
     fillers = make_fillers()
 
     active_game: str | None = None
+    # The player answered the game question with "none" (owner, 2026-11-03):
+    # questions go without a game and nothing asks again until one is detected.
+    no_game = False
     pending_fired = None
     follow_up_wav: bytes | None = None
     follow_up_live: str | None = None  # the follow-up's words, heard live
@@ -695,6 +757,13 @@ def cmd_ask(_args: argparse.Namespace) -> int:
     # when this server has the turn ("recap" in auth_ok.features).
     recap = RecapTrigger()
     recap_due = False
+    # A voice command with no game: the server hears it first, and only the morning
+    # report is answered (`only_if_report`); anything else gets the game question.
+    report_probe = False
+    ask_game_now = False
+    # The detected game that was in front when the player picked another one:
+    # it doesn't take over again (a newly detected, different game does).
+    pick_shadow: str | None = None
 
     while True:
         # A voice (and language) picked in the settings window while this
@@ -714,19 +783,38 @@ def cmd_ask(_args: argparse.Namespace) -> int:
             telemetry(f"  (comandos de voz indisponíveis: {_VOICE.error})")
             _VOICE.error = None
 
-        detected = detect_game(settings.game_aliases_path)
+        if _GAME_PICKED.is_set():
+            _GAME_PICKED.clear()
+            picked = _PICKED_GAME["name"]
+            if picked:
+                shadow = detect_game(settings.game_aliases_path)
+                pick_shadow = shadow if shadow != picked else None
+                active_game, no_game, ask_game_now = picked, False, False
+                _UI.game(picked)
+                recap.forget()  # picked by hand: no matched window to watch for the recap
+                print(t("game_picked", name=picked))
+                print("-" * 48)
+        detected, pick_shadow = _after_pick(detect_game(settings.game_aliases_path), pick_shadow)
         if detected:
             if detected != active_game:
                 _announce_game(settings, detected)
             active_game = detected
+            no_game = False
             game = active_game
             proc = capture.last_game_process()
             if proc and proc[0] == detected:
                 recap.seen(detected, proc[1], proc[2])
         elif active_game:
             game = active_game
+        elif no_game:
+            game = ""  # the wait below still leaves as soon as a game is detected
         else:
-            found, fired = _wait_for_game_or_trigger(settings, all_triggers, stop=_voice_setting_changed)
+            if ask_game_now:
+                ask_game_now = False
+                found, fired = None, manager
+            else:
+                found, fired = _wait_for_game_or_trigger(
+                    settings, all_triggers, stop=lambda: _voice_setting_changed() or _GAME_PICKED.is_set())
             if found:
                 active_game = found
                 game = found
@@ -735,21 +823,25 @@ def cmd_ask(_args: argparse.Namespace) -> int:
                 if proc and proc[0] == found:
                     recap.seen(found, proc[1], proc[2])
             elif fired is None:
-                continue  # the settings window changed the voice: applied at the top
+                continue  # the settings window changed the voice, or a game was picked: applied at the top
+            elif _VOICE is not None and fired is _VOICE.wake and session.supports("report_without_game"):
+                report_probe = True
+                pending_fired = fired
+                game = ""
             else:
                 resolved, is_freeform = resolve_active_game_by_voice(settings, session)
+                if _GAME_PICKED.is_set():
+                    print("-" * 48)
+                    continue  # picked from the list while Ombri asked: the pick wins (top of the loop)
+                if resolved == NO_GAME:
+                    no_game = True
+                    _say_no_game()
+                    print("-" * 48)
+                    continue
                 if resolved:
                     active_game = resolved
                     game = resolved
-                    _UI.game(resolved)
-                    if resolved != recap.game:
-                        recap.forget()  # named by voice: no matched window to watch yet
-                    print(t("game_by_voice_free" if is_freeform else "game_by_voice", name=resolved))
-                    # Next time this game is detected without asking (this PC
-                    # only; capture.py pass 4).
-                    remembered = remember_game_for_foreground(resolved)
-                    if remembered:
-                        telemetry(f"  (lembrado neste PC: {remembered.name} = {resolved})")
+                    _adopt_spoken_game(resolved, is_freeform, recap)
                 else:
                     print(f"  {texts.spoken('game_unresolved')}")
                     play_line("game_unresolved", _voice)
@@ -768,14 +860,14 @@ def cmd_ask(_args: argparse.Namespace) -> int:
             # Also "changed": a new voice/language saved in the settings
             # window - the loop's top applies it before the next question.
             nonlocal recap_due
-            if _voice_setting_changed():
+            if _voice_setting_changed() or _GAME_PICKED.is_set():
                 return True
             seen_now = detect_game(settings.game_aliases_path)
-            if seen_now:
+            if seen_now and seen_now != pick_shadow:
                 proc = capture.last_game_process()
                 if proc and proc[0] == seen_now:
                     recap.seen(seen_now, proc[1], proc[2])
-            if seen_now not in (None, active_game):
+            if seen_now not in (None, active_game, pick_shadow):
                 return True
             # The game's process, not its focus: alt-tabbing to Discord is not "gone".
             if recap.watching() and recap.tick(capture.game_process_alive(recap.pid, recap.exe)):
@@ -800,6 +892,7 @@ def cmd_ask(_args: argparse.Namespace) -> int:
                 game_changed=_foreground_game_changed, game_poll_seconds=settings.game_detect_poll_seconds,
             )
 
+        probe_turn, report_probe = report_probe, False
         if fired is GAME_CHANGED:
             print("-" * 48)
             continue
@@ -820,6 +913,16 @@ def cmd_ask(_args: argparse.Namespace) -> int:
             continue
 
         if fired is remember_manager:
+            if not game:  # "no game" mode: a note belongs to a game, so ask which one
+                resolved, is_freeform = resolve_active_game_by_voice(settings, session)
+                if resolved == NO_GAME or not resolved:
+                    if resolved == NO_GAME:
+                        _say_no_game()
+                    print("-" * 48)
+                    continue
+                active_game = game = resolved
+                no_game = False
+                _adopt_spoken_game(resolved, is_freeform, recap)
             pending_fired = _remember_note(session, settings, game, barge)
             print("-" * 48)
             continue
@@ -927,13 +1030,16 @@ def cmd_ask(_args: argparse.Namespace) -> int:
             _UI.state("pensando")
             return reply
 
+        history_sent = play_history.snapshot()
         try:
             result = session.ask(
                 turn_id, game, wav_bytes=None if live_id else wav, question_text=question_text,
                 screenshot_bytes=screenshot, live_id=live_id,
                 wake=from_wake, record_reply=record_reply if wav else None, follow_up=heard_in_window,
+                only_if_report=probe_turn,
                 controls=gamepad.input_kind(from_pad=fired is gamepad) if gamepad.available else "keyboard",
                 cancel=cancel, on_state=on_state, on_meta=on_meta, on_audio=on_audio, on_usage=_UI.usage,
+                play_history=history_sent, play_history_unasked=play_history.unasked(),
             )
         except ServerError as exc:
             print(t("error", error=exc))
@@ -947,6 +1053,7 @@ def cmd_ask(_args: argparse.Namespace) -> int:
             audio_out.close()
             print("-" * 48)
             continue
+        play_history.after_turn(result, history_sent)
         # A turn with no answer audio (no-notes, cap) must not get a filler
         # or search line after the fact announcing an answer that isn't coming.
         for timer in [filler_timer, *search_timers]:
@@ -976,6 +1083,13 @@ def cmd_ask(_args: argparse.Namespace) -> int:
         _UI.connection("ok")
 
         outcome = result.get("outcome")
+        if probe_turn:
+            if outcome in ("need_game", "empty_question"):
+                ask_game_now = True
+                print("-" * 48)
+                continue
+            if outcome.startswith("answered"):
+                no_game = True  # "qual é a missão?" gets an answer; a game opening ends this
         if outcome not in ("note_saved", "note_discarded", "ignored"):
             print(t("answer", text=result.get("answer_text", "")))
         elif outcome == "ignored":
@@ -1046,7 +1160,7 @@ def _short_combo(combo: str) -> str:
 
 def _voice_ui_label() -> str:
     v = voices.get(_voice)
-    return f"{v.name} · " + ("English" if v.language == "en" else "Português")
+    return f"{v.name} · {voices.language_name(v.language)}"
 
 
 def _send_ui_info(keys: dict) -> None:
@@ -1065,6 +1179,9 @@ def _start_ui(settings) -> None:
     if _UI.pid:
         capture.OWN_WINDOW_PIDS.add(_UI.pid)  # its windows are blacked out of screenshots sent to Kimi
     _UI.connection("connecting")
+    from client import speech as client_speech
+
+    client_speech.level_hook = _UI.voice_level  # the main window's orb follows the voice
     from client.updater import INSTALL_MARKER
 
     if _UI.enabled and INSTALL_MARKER.exists() and os.name == "nt":
@@ -1128,6 +1245,60 @@ def _on_ui_command(cmd: str) -> None:
         _answer_survey(cmd == "survey_open")
     elif cmd == "notes_list" or cmd.startswith("notes_delete:"):
         _notes_command(cmd)
+    elif cmd.startswith("recap_save:"):
+        _save_recap_card(cmd.removeprefix("recap_save:"))
+    elif cmd.startswith("game_set:"):
+        name = " ".join(cmd.removeprefix("game_set:").split())[:GAME_NAME_MAX]
+        if name:
+            _PICKED_GAME["name"] = name
+            _GAME_PICKED.set()
+    elif cmd == "games_list":
+        _games_command()
+
+
+def _after_pick(detected: str | None, pick_shadow: str | None) -> tuple[str | None, str | None]:
+    """(detected, pick_shadow) once a game was picked by hand: the detected
+    game that was in front at the pick is ignored, so the pick stays; any
+    other detected game takes over and ends the shadow."""
+    if detected and detected == pick_shadow:
+        return None, pick_shadow
+    if detected:
+        return detected, None
+    return None, pick_shadow
+
+
+def _games_command() -> None:
+    """The picker's list: GET /v1/games (curated games plus this tester's own)
+    on its own thread; an empty list just leaves the picker typing-only."""
+    session = _SESSION
+
+    def work() -> None:
+        try:
+            games = session.list_games() if session is not None else []
+        except ServerError as exc:
+            telemetry(f"  (lista de jogos indisponível: {exc})")
+            games = []
+        _UI.games(games)
+
+    threading.Thread(target=work, name="games-list", daemon=True).start()
+
+
+def _save_recap_card(offer_id: str) -> None:
+    """The card's "Sim, salva": REST on its own thread, so it never waits
+    behind a question being answered on the WebSocket."""
+    session = _SESSION
+
+    def work() -> None:
+        try:
+            saved = session is not None and bool(offer_id) and session.save_recap_card(offer_id)
+        except ServerError as exc:
+            telemetry(f"  (resumo não salvo: {exc})")
+            saved = False
+        if saved:
+            play_confirm_tone()
+        _UI.notice("recap_saved" if saved else "recap_failed")
+
+    threading.Thread(target=work, name="recap-save", daemon=True).start()
 
 
 def _restart_for_update() -> None:
@@ -1170,6 +1341,9 @@ def _watch_for_updates() -> None:
 
 ANNOUNCE_SEEN_PATH = None  # set lazily: %APPDATA%/Parca/announcements_seen.json
 SURVEY_MAX_SHOWS = 3  # a notice that times out unanswered comes back on a later start, up to this
+# The personality test has clips in these languages only (server/personality.py):
+# a Spanish voice is not invited (it would get the Portuguese page).
+SURVEY_LANGUAGES = ("pt", "en")
 _SURVEY: dict = {}  # the invite shown this run: {"id", "url"}
 
 
@@ -1198,13 +1372,15 @@ def _save_survey_state(state: dict) -> None:
 
 def _survey_url(server_url: str, code: str) -> str | None:
     """https://<the server this app talks to>/ouvir/?l=pt#<code> - only for our
-    own hosts, whatever the server sent."""
+    own hosts, whatever the server sent, and only in a language the test has."""
     from urllib.parse import quote, urlsplit
 
     host = urlsplit(server_url).hostname or ""
     if host not in ("api.ombriplay.com", "api.parcaplay.com"):
         return None
-    lang = "en" if texts.language() == "en" else "pt"
+    lang = texts.language()
+    if lang not in SURVEY_LANGUAGES:
+        return None
     return f"https://{host}/ouvir/?l={lang}#{quote(code, safe='.')}"
 
 
@@ -1254,7 +1430,7 @@ def _show_announcement(announce: dict | None) -> None:
         seen = set()
     if announce["id"] in seen:
         return
-    text = announce.get("en" if texts.language() == "en" else "pt") or announce.get("pt") or ""
+    text = announce.get(texts.language()) or announce.get("pt") or ""
     if not text:
         return
     _UI.notice("announce", text=text)

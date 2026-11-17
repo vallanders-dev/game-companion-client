@@ -71,7 +71,7 @@ The earlier F9 failures are unexplained but confounded: before the
 the key WAS detected, so "doesn't work" then couldn't tell detection
 from application. The quicksave-key theory was never confirmed either.
 Also fixed along the way: the toggle had no visible cue while the orb
-showed (now a dashed ring). Visibility over fullscreen Minecraft was
+showed (a dashed coral ring; since 2026-11-14 the main window's quieter thin ring). Visibility over fullscreen Minecraft was
 broken (the game's own HWND_TOPMOST window covered the orb) and is fixed
 by _reassert_topmost() - confirmed live 2026-09-23. A game that takes
 the display in true exclusive mode would still hide any window.
@@ -86,7 +86,7 @@ import sys
 from enum import Enum
 
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QRect, QRectF, QTimer, Qt
-from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath
 from PySide6.QtWidgets import QApplication, QWidget
 
 from client.gui.global_keys import AsyncKeyPoller
@@ -505,16 +505,10 @@ class OverlayWindow(QWidget):
         outer = QRectF(orb_left + m, m, ORB_OUTER_DIAMETER, ORB_OUTER_DIAMETER)
         key = _hud_key(self.state)
         draw_sphere(painter, outer.center(), ORB_SPHERE_RADIUS * breathing_scale(key, self._anim_phase),
-                    state_color(key), glow=1.0)
-
-        if self._click_through:
-            # Click-through cue: a thin dashed ring shown ONLY while active -
-            # not a permanent stroke (no border otherwise, by design).
-            ring_color = QColor(self.theme.accent)
-            ring_color.setAlphaF(0.55)
-            painter.setPen(QPen(ring_color, 1.6, Qt.PenStyle.DashLine))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawEllipse(outer)
+                    state_color(key), glow=1.0,
+                    # Click-through cue: the main window's quiet ring (thin, solid, the orb's own colour at
+                    # 25%), shown only while active. Replaced the coral dashed ring (owner, 2026-11-14).
+                    ring_radius=outer.width() / 2 if self._click_through else None)
 
         self._paint_usage(painter, orb_footprint)
         painter.end()

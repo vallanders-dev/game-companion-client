@@ -148,6 +148,10 @@ class HudClient:
         if text:
             self._send({"type": "append", "text": text})
 
+    def voice_level(self, level: float) -> None:
+        """How loud the voice is right now, 0..1 (the main window's orb follows it)."""
+        self._send({"type": "voice", "level": round(level, 3)})
+
     def game(self, name: str | None) -> None:
         self._send({"type": "game", "name": name})
 
@@ -178,6 +182,11 @@ class HudClient:
         """What the server can do (auth_ok.features): "notes" turns the
         "Minhas notas" page on. Sent after each connect."""
         self._send({"type": "features", "list": sorted(str(f) for f in features)})
+
+    def games(self, names: list[str]) -> None:
+        """The answer to the UI's "games_list" command: names for the game
+        picker's list (typing any other name still works)."""
+        self._send({"type": "games", "list": [str(n) for n in names]})
 
     def notes(self, items: list[dict], error: str = "") -> None:
         """The answer to the UI's "notes_list" / "notes_delete:<id>" commands:

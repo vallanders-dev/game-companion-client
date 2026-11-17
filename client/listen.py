@@ -232,7 +232,25 @@ _OPEN_ENDINGS = {
            "deixa eu", "deixa eu ver", "pera", "perai", "espera", "como", "onde", "quando", "qual", "quem",
            "esse", "essa", "isso", "eu", "ele", "ela", "tem", "ta", "to", "e o", "e a", "em", "por", "pelo",
            "pela", "sobre", "ate"),
+    # Spanish (2026-11-03, docs/spanish.md §4.C), accent-folded like the text.
+    # Left out on purpose, being complete answers or closings on their own:
+    # "si" (sí), "no", "ya", "bien", "bueno", "pues", "mas" (más), "un momento",
+    # and "esta"/"estaba" (está: "no sé dónde está" is a finished question).
+    "es": ("eh", "em", "ehm", "mm", "mmm", "hmm", "hm", "ah", "este", "o sea", "osea", "es que", "a ver", "digo",
+           "tipo", "como que", "digamos", "entonces", "y", "e", "o", "u", "ni", "pero", "que", "porque", "aunque",
+           "mientras", "luego", "despues", "antes", "como", "cuando", "donde", "cual", "cuales", "quien", "cuanto",
+           "cuanta", "cuantos", "para", "por", "de", "del", "al", "a", "en", "con", "sin", "sobre", "hasta",
+           "desde", "entre", "hacia", "contra", "segun", "el", "la", "los", "las", "un", "una", "unos", "unas",
+           "lo", "le", "les", "me", "te", "se", "mi", "mis", "tu", "tus", "su", "sus", "ese", "esa", "esos",
+           "esas", "estos", "estas", "aquel", "yo", "nos", "es", "estoy", "hay", "tengo",
+           "tiene", "puedo", "quiero", "voy", "voy a", "tengo que", "hay que", "quiero que", "para que",
+           "dejame", "dejame ver", "espera", "esperate", "muy", "tan", "y el", "y la", "y luego"),
 }
+# A language with its own list keeps the Portuguese one appended as a
+# catch-all (English since 0.1.19) - except Spanish: Portuguese's "no" is a
+# complete Spanish answer ("¿Lo guardo?" - "No."), "a"/"o" are its own
+# connectives anyway, and its list stands on its own.
+_OWN_ENDINGS_ONLY = frozenset({"es"})
 
 
 def ends_mid_thought(text: str, language: str = "pt") -> bool:
@@ -250,7 +268,9 @@ def ends_mid_thought(text: str, language: str = "pt") -> bool:
     words = "".join(c if c.isalnum() else " " for c in folded).split()
     if not words:
         return False
-    endings = _OPEN_ENDINGS.get(language, ()) + (_OPEN_ENDINGS["pt"] if language != "pt" else ())
+    endings = _OPEN_ENDINGS.get(language, ())
+    if language != "pt" and language not in _OWN_ENDINGS_ONLY:
+        endings += _OPEN_ENDINGS["pt"]
     tail1, tail2, tail3 = words[-1], " ".join(words[-2:]), " ".join(words[-3:])
     return tail1 in endings or tail2 in endings or tail3 in endings
 

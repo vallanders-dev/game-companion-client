@@ -276,13 +276,16 @@ class ServerSession:
         return url.split("/v1/", 1)[0].rstrip("/")
 
     # -- my notes (docs/player_notes.md): plain REST next to the WebSocket ----
-    def _rest(self, method: str, path: str, timeout: float = 10.0) -> dict:
+    def _rest(self, method: str, path: str, timeout: float = 10.0, body: dict | None = None) -> dict:
         import urllib.error
         import urllib.request
 
-        req = urllib.request.Request(self.http_base + path, method=method,
-                                     headers={"Authorization": f"Bearer {self.token}",
-                                              "X-Parca-Version": _app_version()})
+        headers = {"Authorization": f"Bearer {self.token}", "X-Parca-Version": _app_version()}
+        data = None
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(self.http_base + path, method=method, headers=headers, data=data)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - our own server
                 return json.loads(resp.read().decode("utf-8") or "{}")
@@ -292,6 +295,16 @@ class ServerSession:
             raise ServerError(f"servidor respondeu {exc.code}") from exc
         except Exception as exc:  # noqa: BLE001 - DNS, timeout, refused
             raise ServerError(f"não consegui falar com o servidor: {exc}") from exc
+
+    def save_recap_card(self, offer_id: str) -> bool:
+        """The recap card's "Sim, salva" (`POST /v1/recap/save`). True when the
+        server saved it; False when the card had expired or was already used."""
+        return bool(self._rest("POST", "/v1/recap/save", body={"offer_id": offer_id}).get("saved"))
+
+    def list_games(self) -> list[str]:
+        """Games with notes: curated plus this tester's own (`GET /v1/games`)."""
+        games = self._rest("GET", "/v1/games").get("games", [])
+        return [g for g in games if isinstance(g, str) and g.strip()]
 
     def list_notes(self) -> list[dict]:
         """This tester's own notes, newest first (`GET /v1/notes`)."""
@@ -430,6 +443,9 @@ class ServerSession:
         record_reply=None,
         follow_up: bool = False,
         live_id: str | None = None,
+        play_history: dict | None = None,
+        only_if_report: bool = False,
+        play_history_unasked: bool = False,
     ) -> dict:
         """One ask-turn, start to finish - blocks until `turn_result`
         arrives (or the connection breaks). `wav_bytes` is the real path
@@ -476,6 +492,12 @@ class ServerSession:
             msg["follow_up"] = True
         if live_id:
             msg["live_id"] = live_id  # heard live (LiveTranscript): the server has the words, no WAV needed
+        if only_if_report:
+            msg["only_if_report"] = True  # no game open: answer only a morning report
+        if play_history:
+            msg["play_history"] = play_history  # for the morning report; see client/play_history.py
+        if play_history_unasked:
+            msg["play_history_unasked"] = True  # a morning report asks first
         frames: list = [json.dumps(msg)]
         if screenshot_bytes is not None:
             frames.append(screenshot_bytes)
@@ -596,6 +618,7 @@ class ServerSession:
         on_state=None,
         on_audio=None,
         on_usage=None,
+        card: bool = False,
     ) -> dict:
         """The end-of-session recap (docs/player_notes.md, piece B/C): tells
         the server the game is gone; the server either answers at once with
@@ -604,6 +627,10 @@ class ServerSession:
         cue to `record_reply()`, a clear yes saves. Only call when
         `supports("recap")`: an older server never answers this kind."""
         msg = {"type": "turn_start", "turn_id": turn_id, "kind": "recap", "game": game, **self._voice_field()}
+        if card:
+            # "recap_card" (2026-11-12): the server answers `recap_card` with the
+            # card's text and an offer_id, nothing spoken; no round to record.
+            msg["card"] = True
         self._send_opening([json.dumps(msg)])
         return self._confirm_rounds(turn_id, record_reply, cancel, on_state, on_audio, on_usage)
 

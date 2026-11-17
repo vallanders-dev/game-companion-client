@@ -22,8 +22,9 @@ from PySide6.QtWidgets import (
 )
 
 from client.gui.fonts import BODY_FAMILY, HEADING_FAMILY, ensure_fonts_loaded
-from client.gui.orb import breathing_scale, draw_sphere, sphere_image, state_color
-from client.gui.ui_texts import questions, ui
+from client.gui.orb import HALO_STATES, breathing_scale, draw_sphere, draw_thinking_halo, sphere_image, state_color
+from client.gui.speaking import make_design
+from client.gui.ui_texts import UI, questions, ui
 
 WINDOW_W, WINDOW_H = 440, 780
 RADIUS = 12
@@ -164,20 +165,33 @@ def line_icon(kind: str, color: str = TEXT, size: int = 16) -> QIcon:
 
 
 class OrbWidget(QWidget):
-    """The breathing sphere; `ring` adds the main view's thin ring."""
+    """The breathing sphere; `ring` adds the main view's thin ring. `halo` is the
+    radius of the ring of light while Ombri thinks (`orb.draw_thinking_halo()`), eased
+    in and out over ~0.3 s; with a `ring` and no `halo` it sits just outside the ring.
+    While Ombri talks, the look comes from the library in client/gui/speaking/."""
 
-    def __init__(self, box: int, radius: float, ring: float | None = None, glow: float = 1.0) -> None:
+    def __init__(self, box: int, radius: float, ring: float | None = None, glow: float = 1.0,
+                 halo: float | None = None) -> None:
         super().__init__()
         self.setFixedSize(box, box)
         self._radius, self._ring, self._glow = radius, ring, glow
         self.state = "idle"
+        self._halo_radius = halo or (ring + 4 if ring else None)
+        self._halo = 0.0
+        self._speaking = make_design()
         self._t0 = time.monotonic()
         self._timer = QTimer(self)
+        # The default timer rounds 33 ms up to ~47 on Windows: 21 fps, measured 2026-11-06.
+        self._timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._timer.timeout.connect(self.update)
 
     def set_state(self, state: str) -> None:
         self.state = state
         self.update()
+
+    def feed_voice(self, level: float) -> None:
+        if self.isVisible():
+            self._speaking.feed_level(level, time.monotonic() - self._t0)
 
     def showEvent(self, event) -> None:  # noqa: N802 - animate only while visible
         self._timer.start(33)
@@ -191,8 +205,15 @@ class OrbWidget(QWidget):
         p = QPainter(self)
         t = time.monotonic() - self._t0
         c = QPointF(self.width() / 2, self.height() / 2)
-        draw_sphere(p, c, self._radius * breathing_scale(self.state, t), state_color(self.state),
-                    glow=self._glow, ring_radius=self._ring)
+
+        def draw_orb(q: QPainter) -> None:
+            draw_sphere(q, c, self._radius * breathing_scale(self.state, t), state_color(self.state),
+                        glow=self._glow, ring_radius=self._ring)
+            if self._halo_radius:
+                self._halo += ((1.0 if self.state in HALO_STATES else 0.0) - self._halo) * 0.12
+                draw_thinking_halo(q, c, self._halo_radius, state_color("pensando"), t, self._halo)
+
+        self._speaking.paint(p, c, self._halo_radius, t, self.state, draw_orb, self.width(), self.devicePixelRatioF())
         p.end()
 
 
@@ -241,12 +262,12 @@ class TitleBar(QWidget):
 
 
 def _fmt_date(iso: str, lang: str) -> str:
-    """2026-10-31 -> 31/10/2026 (pt) / 10/31/2026 (en); anything else as is."""
+    """2026-10-31 -> 31/10/2026 (pt, es) / 10/31/2026 (en); anything else as is."""
     parts = (iso or "").split("-")
     if len(parts) != 3 or not all(p.isdigit() for p in parts):
         return iso or ""
     y, m, d = parts
-    return f"{d}/{m}/{y}" if lang == "pt" else f"{m}/{d}/{y}"
+    return f"{m}/{d}/{y}" if lang == "en" else f"{d}/{m}/{y}"  # pt and es: day first
 
 
 class NoteCard(QFrame):
@@ -321,6 +342,7 @@ class MainWindow(QWidget):
     hidden_to_tray = Signal()
     notes_requested = Signal()  # "Minhas notas" opened or refreshed: fetch the list
     note_delete_requested = Signal(str)  # the player confirmed a delete
+    game_pick_requested = Signal()  # "Trocar" on the game card: open the game picker
 
     def __init__(self) -> None:
         super().__init__(None, Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
@@ -382,7 +404,7 @@ class MainWindow(QWidget):
         col.setSpacing(16)
         # The widget is larger than the sphere so the glow fades out inside
         # it (a smaller box clipped the glow into a visible square).
-        self.w_orb = OrbWidget(200, 56, glow=0.8)
+        self.w_orb = OrbWidget(216, 56, glow=0.8, halo=76)
         col.addWidget(self.w_orb, 0, Qt.AlignmentFlag.AlignHCenter)
         self.w_title = _label(size=26, weight=600, heading=True)
         self.w_title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
@@ -434,11 +456,12 @@ class MainWindow(QWidget):
 
         hero = QVBoxLayout()
         hero.setSpacing(8)
-        self.s_orb = OrbWidget(232, 66, ring=88, glow=0.8)  # 176 px ring + room for the glow
+        # The glow reaches 124 px at the top of the pulse; a smaller box cuts it into a square.
+        self.s_orb = OrbWidget(256, 66, ring=88, glow=0.8)
         hero.addWidget(self.s_orb, 0, Qt.AlignmentFlag.AlignHCenter)
         self.s_state = _label(size=22, weight=600, heading=True)
         self.s_state.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        hero.addSpacing(-22)
+        hero.addSpacing(-34)
         hero.addWidget(self.s_state)
         self.s_hint = _label(size=14, color=TEXT_2)
         self.s_hint.setAlignment(Qt.AlignmentFlag.AlignHCenter)
@@ -455,7 +478,18 @@ class MainWindow(QWidget):
         self.s_game_caps = _label(name="caps")
         self.s_game = _label(size=16, weight=600)
         self.s_game_sub = _label(name="sub")
-        for w in (self.s_game_caps, self.s_game, self.s_game_sub):
+        # "Trocar" (owner, 2026-11-12): pick or type the game, no restart needed.
+        self.s_game_change = QPushButton()
+        self.s_game_change.setObjectName("small")
+        self.s_game_change.setFixedHeight(28)
+        self.s_game_change.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.s_game_change.clicked.connect(self.game_pick_requested.emit)
+        caps_row = QHBoxLayout()
+        caps_row.addWidget(self.s_game_caps)
+        caps_row.addStretch(1)
+        caps_row.addWidget(self.s_game_change)
+        g.addLayout(caps_row)
+        for w in (self.s_game, self.s_game_sub):
             g.addWidget(w)
         col.addWidget(game)
 
@@ -600,7 +634,7 @@ class MainWindow(QWidget):
         kw = {"ask": self.keys["ask"], "note": self.keys["note"]}
         color = state_color(self.state).name()
         self.s_orb.set_state(self.state)
-        self.w_orb.set_state("idle" if self.state != "pausado" else "pausado")
+        self.w_orb.set_state(self.state)
         self.s_state.setText(ui(L, f"state_{self.state}"))
         self.s_state.setStyleSheet(f'font-family: "{HEADING_FAMILY}"; font-size: 22px; font-weight: 600; color: {color};')
         self.s_hint.setText(ui(L, f"hint_{self.state}", **kw))
@@ -611,6 +645,7 @@ class MainWindow(QWidget):
             lab.setText(ui(L, f"conn_{self.conn}"))
 
         self.s_game_caps.setText(ui(L, "game"))
+        self.s_game_change.setText(ui(L, "game_change"))
         self.s_game.setText(self.game or ui(L, "game_none"))
         self.s_game_sub.setText(ui(L, "game_sub") if self.game else ui(L, "game_none_sub"))
 
@@ -655,12 +690,16 @@ class MainWindow(QWidget):
             self.game = name
             self._refresh()
 
+    def set_voice_level(self, level: float) -> None:
+        self.s_orb.feed_voice(level)
+        self.w_orb.feed_voice(level)
+
     def set_usage(self, count: int, cap: int) -> None:
         self.usage = (count, cap)
         self._refresh()
 
     def set_info(self, lang: str, voice_label: str, keys: dict) -> None:
-        self.lang = lang if lang in ("pt", "en") else "pt"
+        self.lang = lang if lang in UI else "pt"
         self.voice_label = voice_label
         self.keys = {"ask": keys.get("ask", "F8"), "note": keys.get("note", "F6"), "pad": keys.get("pad")}
         self._rebuild_keys()

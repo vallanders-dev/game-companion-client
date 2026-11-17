@@ -20,11 +20,12 @@ time a "game" message carries a real name, then stays.
 
 stdin, JSON lines from the client:
   {"type": "state", "state": "idle|ouvindo|pensando|pesquisando|falando|pausado"}
+  {"type": "voice", "level": 0.0-1.0}   (the voice's loudness, ~10 times a second while it plays)
   {"type": "append", "text": str}              (ignored - no text display)
   {"type": "game", "name": str|null}
   {"type": "usage", "count": int, "cap": int}
   {"type": "conn", "state": "connecting|ok|offline"}
-  {"type": "info", "lang": "pt|en", "voice": str, "keys": {"ask", "note", "pad"}}
+  {"type": "info", "lang": "pt|en|es", "voice": str, "keys": {"ask", "note", "pad"}}
   {"type": "paused", "on": bool}
   {"type": "notice", "kind": "admin|offline|update|announce|survey", "version"?, "text"?}
   {"type": "show"}
@@ -48,8 +49,8 @@ import time
 from PySide6.QtCore import QObject, QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QIcon, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QSystemTrayIcon, QVBoxLayout, QWidget,
-    QWidgetAction,
+    QApplication, QComboBox, QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QSystemTrayIcon, QVBoxLayout,
+    QWidget, QWidgetAction,
 )
 
 from client.gui.fonts import BODY_FAMILY, HEADING_FAMILY, ensure_fonts_loaded
@@ -60,6 +61,7 @@ from client.gui.ui_texts import ui
 
 STATES = {s.value: s for s in HudState}
 NOTICE_SECONDS = 20
+RECAP_NOTICE_SECONDS = 90  # the game just closed: give the player time to see it (server keeps it 30 min)
 
 MENU_QSS = f"""
 QMenu {{ background: #2B2B2B; border: 1px solid #3A3A3A; border-radius: 8px; padding: 4px; }}
@@ -192,7 +194,8 @@ class Notice(QWidget):
         if self._on_no:
             self._on_no()
 
-    def pop(self, title: str, body: str, yes: str | None, no: str | None, on_yes=None, on_no=None) -> None:
+    def pop(self, title: str, body: str, yes: str | None, no: str | None, on_yes=None, on_no=None,
+            seconds: int = NOTICE_SECONDS) -> None:
         self.title.setText(title)
         self.body.setText(body)
         self.yes.setVisible(bool(yes))
@@ -206,7 +209,107 @@ class Notice(QWidget):
         self.move(QPoint(geo.right() - self.width() - 16, geo.bottom() - self.height() - 16))
         self.show()
         _no_activate(self)
-        self._timer.start(NOTICE_SECONDS * 1000)
+        self._timer.start(seconds * 1000)
+
+
+PICKER_QSS = TOAST_QSS + f"""
+QComboBox {{ background: #2B2B2B; color: {TEXT}; border: 1px solid #3A3A3A; border-radius: 6px;
+             padding: 6px 10px; font-family: "{BODY_FAMILY}"; font-size: 14px; min-height: 24px; }}
+QComboBox QAbstractItemView {{ background: #2B2B2B; color: {TEXT}; selection-background-color: #383838; }}
+"""
+GAME_NAME_MAX = 80  # same cap as client/main.py
+
+
+class GamePicker(QWidget):
+    """Pick the game from the list or type it (owner, 2026-11-12): the same
+    choice as answering "qual jogo?" out loud. Unlike the notice it takes
+    focus, because typing needs it - so it only opens on the player's click."""
+
+    def __init__(self) -> None:
+        super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
+                         | Qt.WindowType.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setStyleSheet(PICKER_QSS)
+        self.setFixedWidth(380)
+        frame = QFrame(self)
+        frame.setObjectName("toast")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(frame)
+        col = QVBoxLayout(frame)
+        col.setContentsMargins(16, 16, 16, 16)
+        col.setSpacing(10)
+        self.title = QLabel()
+        self.title.setStyleSheet("font-size: 15px; font-weight: 700;")
+        self.body = QLabel()
+        self.body.setWordWrap(True)
+        self.body.setStyleSheet(f"font-size: 13px; color: {CHIP_TEXT};")
+        self.box = QComboBox()
+        self.box.setEditable(True)
+        self.box.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.box.lineEdit().setMaxLength(GAME_NAME_MAX)
+        self.box.lineEdit().returnPressed.connect(self._use)
+        self.box.lineEdit().textChanged.connect(self._enable)
+        completer = self.box.completer()
+        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        for w in (self.title, self.body, self.box):
+            col.addWidget(w)
+        buttons = QHBoxLayout()
+        buttons.setSpacing(8)
+        self.yes = QPushButton()
+        self.yes.setObjectName("yes")
+        self.no = QPushButton()
+        self.no.setObjectName("no")
+        for b in (self.yes, self.no):
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            buttons.addWidget(b, 1)
+        col.addSpacing(4)
+        col.addLayout(buttons)
+        self.yes.clicked.connect(self._use)
+        self.no.clicked.connect(self.hide)
+        self.games: list[str] = []
+
+    def set_games(self, names: list[str]) -> None:
+        typed = self.box.currentText()
+        self.games = sorted({str(n).strip() for n in names if str(n).strip()}, key=str.casefold)
+        self.box.clear()
+        self.box.addItems(self.games)
+        self.box.setEditText(typed)
+
+    def open(self, lang: str, current: str | None) -> None:
+        self.title.setText(ui(lang, "pick_title"))
+        self.body.setText(ui(lang, "pick_body"))
+        self.box.lineEdit().setPlaceholderText(ui(lang, "pick_placeholder"))
+        self.yes.setText(ui(lang, "pick_yes"))
+        self.no.setText(ui(lang, "pick_no"))
+        self.box.setEditText("")
+        self._enable()
+        _send("games_list")  # fresh list; typing works while it arrives
+        self.adjustSize()
+        geo = QApplication.primaryScreen().availableGeometry()
+        self.move(QPoint(geo.right() - self.width() - 16, geo.bottom() - self.height() - 16))
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.box.setFocus()
+
+    def _enable(self) -> None:
+        self.yes.setEnabled(bool(self.box.currentText().strip()))
+
+    def chosen(self) -> str:
+        """The list's own spelling when the typed name matches one ignoring
+        case and spaces (one game key per game); otherwise as typed."""
+        typed = " ".join(self.box.currentText().split())[:GAME_NAME_MAX]
+        key = typed.casefold()
+        return next((g for g in self.games if " ".join(g.split()).casefold() == key), typed)
+
+    def _use(self) -> None:
+        name = self.chosen()
+        if not name:
+            return
+        self.hide()
+        _send("game_set:" + name)
 
 
 class TrayHeader(QWidget):
@@ -240,6 +343,7 @@ class Ui:
         self.window = MainWindow()
         self.overlay = OverlayWindow(theme=DARK_THEME)
         self.notice = Notice()
+        self.picker = GamePicker()
         self.revealed = False
         self.paused = False
         self.told_tray = False
@@ -251,6 +355,7 @@ class Ui:
         # answers with a "notes" message after calling the server.
         self.window.notes_requested.connect(lambda: _send("notes_list"))
         self.window.note_delete_requested.connect(lambda note_id: _send("notes_delete:" + note_id))
+        self.window.game_pick_requested.connect(self.open_picker)
 
         self.tray = QSystemTrayIcon(QIcon(QPixmap.fromImage(sphere_image(64))))
         self.tray.setToolTip("Ombri")
@@ -266,14 +371,16 @@ class Ui:
         self.menu.addAction(head_action)
         self.menu.addSeparator()
         self.a_open = QAction(line_icon("window"), "", self.menu)
+        self.a_game = QAction(line_icon("screen"), "", self.menu)
         self.a_pause = QAction(line_icon("pause"), "", self.menu)
         self.a_settings = QAction(line_icon("gear"), "", self.menu)
         self.a_quit = QAction(line_icon("power"), "", self.menu)
         self.a_open.triggered.connect(self.window.show_and_raise)
+        self.a_game.triggered.connect(self.open_picker)
         self.a_pause.triggered.connect(lambda: _send("resume" if self.paused else "pause"))
         self.a_settings.triggered.connect(lambda: _send("settings"))
         self.a_quit.triggered.connect(lambda: _send("quit"))
-        for a in (self.a_open, self.a_pause, self.a_settings):
+        for a in (self.a_open, self.a_game, self.a_pause, self.a_settings):
             self.menu.addAction(a)
         self.menu.addSeparator()
         self.menu.addAction(self.a_quit)
@@ -291,6 +398,7 @@ class Ui:
     def _texts(self) -> None:
         L = self.window.lang
         self.a_open.setText(ui(L, "tray_open"))
+        self.a_game.setText(ui(L, "tray_game"))
         self.a_pause.setText(ui(L, "tray_resume" if self.paused else "tray_pause"))
         self.a_pause.setIcon(line_icon("play" if self.paused else "pause"))
         self.a_settings.setText(ui(L, "tray_settings"))
@@ -300,6 +408,10 @@ class Ui:
             status += f" · {self.window.game}"
         self.header.status.setText(status)
         self.tray.setToolTip(f"Ombri · {status}")
+
+    def open_picker(self) -> None:
+        self.notice.hide()
+        self.picker.open(self.window.lang, self.window.game)
 
     def _tray_click(self, reason) -> None:
         if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
@@ -333,6 +445,8 @@ class Ui:
             if t_sent is not None:
                 print(f"[ui-process] state={self.state} pipe_latency={(time.time() - t_sent) * 1000:.1f}ms",
                       flush=True)
+        elif kind == "voice":
+            self.window.set_voice_level(max(0.0, min(1.0, float(msg.get("level", 0.0)))))
         elif kind == "game":
             name = msg.get("name")
             self.window.set_game(name)
@@ -362,6 +476,8 @@ class Ui:
             self.window.set_features(msg.get("list") or [])
         elif kind == "notes":
             self.window.set_notes(msg.get("items") or [], str(msg.get("error") or ""))
+        elif kind == "games":
+            self.picker.set_games([g for g in (msg.get("list") or []) if isinstance(g, str)])
         elif kind == "echo_cmd":
             # Test hook (eval/client_ui_harness.py): proves the command
             # channel end to end without a mouse. The client never sends it.
@@ -383,6 +499,21 @@ class Ui:
         elif kind == "survey":
             self.notice.pop(ui(L, "survey_title"), ui(L, "survey_body"), ui(L, "survey_yes"), ui(L, "survey_no"),
                             on_yes=lambda: _send("survey_open"), on_no=lambda: _send("survey_later"))
+        elif kind == "recap" and (msg or {}).get("text") and (msg or {}).get("offer_id"):
+            # The end-of-session card (owner, 2026-11-12): only "Sim, salva"
+            # saves; "Não salva" or letting it go away saves nothing.
+            offer_id = str(msg["offer_id"])
+            self.notice.pop(ui(L, "recap_title", game=str(msg.get("game") or "")), str(msg["text"]),
+                            ui(L, "recap_yes"), ui(L, "recap_no"),
+                            on_yes=lambda: _send("recap_save:" + offer_id), seconds=RECAP_NOTICE_SECONDS)
+        elif kind == "game_ask":
+            # Ombri is asking "qual jogo?" out loud; the card offers the list too.
+            self.notice.pop(ui(L, "pick_title"), ui(L, "game_ask_body"), ui(L, "game_ask_list"), None,
+                            on_yes=self.open_picker)
+        elif kind == "recap_saved":
+            self.notice.pop(ui(L, "recap_saved_title"), ui(L, "recap_saved_body"), None, None, seconds=6)
+        elif kind == "recap_failed":
+            self.notice.pop(ui(L, "recap_failed_title"), ui(L, "recap_failed_body"), None, None, seconds=8)
 
 
 def main() -> None:

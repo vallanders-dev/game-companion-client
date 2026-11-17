@@ -42,12 +42,36 @@ from pathlib import Path
 
 from client import launcher_lookup
 
-# JPEG q80 at 960 px wide, not PNG at 1280: measured 2026-09-26
-# (eval/scene_image_size_timing.py, 6 real game screenshots) - ~56 KB vs
-# ~1 MB and a median Kimi scene read of 2.49 s vs 3.57 s, with scenes as
-# good or better; 640 px started breaking the one-short-phrase reply.
-_MAX_WIDTH = 960
-_JPEG_QUALITY = 80
+# 1280 px wide, JPEG q92. Two measurements, which judged DIFFERENT tasks -
+# keep both in mind before changing either number:
+#
+# 2026-09-26 (eval/scene_image_size_timing.py, 6 real game screenshots):
+# JPEG q80 at 960 beat PNG at 1280 - ~56 KB vs ~1 MB, median Kimi scene read
+# 2.49 s vs 3.57 s, scenes as good or better; 640 px broke the
+# one-short-phrase reply on REPO. That task was SCENE description ("where am
+# I") in Naruto/REPO/World War Z, and 960 was right for it.
+#
+# 2026-11-16 (eval/vision_frames_probe.py, the 11 real Minecraft failure
+# frames re-cut from the OBS takes at native 1280, 2 interleaved passes,
+# scored on vision_frames/labels.json): naming a SMALL HOTBAR ICON is a
+# different task and 960 was losing it. The bone: 0/6 correct and 4
+# confident wrong names at 960 q80, 3/6 at 1280 q80, 6/6 correct and 0 wrong
+# at 1280 q92. Furnace 4/6 -> 6/6. Cost of the move: input tokens 1152 ->
+# 1648 ($0.0015 -> $0.0020 a read) and +0.58 s mean latency.
+#
+# Why q92 and not q80: Kimi counts image tokens by PIXEL DIMENSIONS, not file
+# bytes - q80 and q92 at 1280 both cost 1648 tokens. The quality is free
+# except for upload bytes (~78 KB -> ~130 KB), and it is where the bone
+# result came from. Server cap is MAX_FRAME_BYTES = 6 MB, far above this.
+#
+# Honest limits of that run: four items did not move at any resolution
+# (bee_nest, iron_block, lead, rotten_flesh) and rotten_flesh got MORE
+# confidently wrong at q92 ("carne crua" where 1280 q80 hedged "possivelmente
+# carne"), so this buys small-icon reads, not accuracy in general. Above 1280
+# is still untested: every recording on disk is 1280x720, so it needs a fresh
+# native-resolution capture, not another run of the same frames upscaled.
+_MAX_WIDTH = 1280
+_JPEG_QUALITY = 92
 
 _keyboard_mod = None
 _keyboard_probed = False
@@ -1174,3 +1198,53 @@ def resolve_spoken_game(transcript: str, candidates: list[str], min_ratio: float
     top = max(s for _c, s in scored)
     winners = [c for c, s in scored if s == top]
     return winners[0] if len(winners) == 1 else None
+
+
+# Answers to "which game are you playing?" that mean "none" (owner, 2026-11-03:
+# say so and Ombri stops asking). Compared whole, after `_normalize_game_text()`
+# and the fillers below - never "contains", so "não, tô jogando Minecraft" is
+# still a game answer. Every language in one set: Scribe can mislabel the
+# language, and no phrase here means anything else in another one.
+NO_GAME_ANSWERS = frozenset({
+    # pt
+    "nao", "nada", "nada nao", "nenhum", "nenhum jogo", "nenhum nao", "sem jogo", "agora nao",
+    "nenhum por enquanto", "nada por enquanto", "nao tem jogo", "nao e jogo", "nao e nenhum jogo",
+    "to sem jogo", "estou sem jogo",
+    "nao to jogando", "nao estou jogando", "nao to jogando nada", "nao estou jogando nada",
+    "nao to jogando nenhum", "nao estou jogando nenhum", "nao to jogando nenhum jogo",
+    "nao estou jogando nenhum jogo", "nao to jogando agora", "nao estou jogando agora",
+    "nao to jogando nada agora", "nao estou jogando nada agora",
+    "nao to em jogo nenhum", "nao estou em jogo nenhum", "nao to jogando nenhum jogo agora",
+    # en
+    "no", "nope", "none", "nothing", "no game", "not now", "not right now", "nothing right now",
+    "no game right now", "not playing", "not playing anything", "not playing right now",
+    "i m not playing", "im not playing", "i am not playing", "i m not playing anything",
+    "im not playing anything", "i am not playing anything", "i m not playing a game",
+    "i am not playing a game", "i m not playing any game", "i am not playing any game",
+    "i m not playing right now", "i am not playing right now", "i m not playing anything right now",
+    # es (neutral + the heard-side regional "ahorita"; "nada" / "no" are shared above)
+    "ninguno", "ninguna", "ningun juego", "sin juego", "estoy sin juego", "no hay juego", "no es un juego",
+    "no es ningun juego", "no juego nada", "no estoy jugando", "no estoy jugando nada",
+    "no estoy jugando a nada", "no estoy jugando ningun juego", "no estoy jugando ahora",
+    "no estoy jugando nada ahora", "no estoy jugando ahorita", "no estoy en ningun juego",
+    "ahora no", "ahora nada", "ahora mismo no", "ahorita no", "ahorita nada", "nada ahora",
+    "por ahora nada", "por ahora ninguno", "ninguno por ahora", "ninguno todavia", "todavia no", "todavia nada",
+    "aun no", "aun nada",
+})
+# Said before or after the answer itself ("Ombri, nenhum", "ah, none", "eu não tô jogando").
+_NO_GAME_FILLERS = frozenset({"ombri", "ah", "ahn", "eh", "hm", "hmm", "uh", "um", "olha", "cara", "mano",
+                              "eu", "well", "oh", "pues", "bueno", "obrigado", "thanks", "gracias", "che", "oye",
+                              "mira"})
+
+
+def is_no_game_answer(transcript: str) -> bool:
+    """True when the spoken answer to the game question means "I'm not
+    playing anything" - a closed list, matched whole (Principle 1). Checked
+    before `resolve_spoken_game()`, whose containment tier would otherwise
+    let a short "nada" match inside a longer candidate name."""
+    words = _normalize_game_text(transcript).split()
+    while words and words[0] in _NO_GAME_FILLERS:
+        words.pop(0)
+    while words and words[-1] in _NO_GAME_FILLERS:
+        words.pop()
+    return " ".join(words) in NO_GAME_ANSWERS

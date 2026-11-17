@@ -12,8 +12,9 @@ Modes, set by client/main.py:
   `wake`. If the player kept talking ("Ei Ombri, onde fica o ferreiro?") the
   utterance from the name on is kept as the question's audio, and capture
   goes on until a TAIL_SILENCE_SECONDS pause, so no second recording is
-  needed; the server strips the name (companion.strip_wake_name()). A bare "Ei, Ombri." fires with no audio and the client
-  records the question as after F8.
+  needed; the server strips the name (companion.strip_wake_name()). A bare "Ei, Ombri." waits
+  NAME_PAUSE_SECONDS: speech in that time joins the question ("Ombri... acorda"); otherwise
+  it fires with no audio and the client records the question as after F8.
 - "shush" (Ombri thinking or speaking): an utterance that IS a stop phrase
   fires `shush` - the barge-in watcher stops the answer, nothing else starts.
 - None (the client is recording through its own stream): audio is ignored.
@@ -45,6 +46,11 @@ WAKE_PHRASES = ["hey omri", "omri"]
 SHUSH_PHRASES = {
     "pt": ["chega", "silencio", "chega ombro"],
     "en": ["stop", "quiet", "enough", "shush", "stop omri"],
+    # Spanish (2026-11-03, docs/spanish.md §4.C). Heard with the es model
+    # since its hash was pinned (2026-11-04); both words are in its
+    # vocabulary (and the pt model's, the fallback). "ya basta" / "cállate"
+    # can come later, measured in eval/kws_probe.py as the others were.
+    "es": ["basta", "silencio"],
 }
 # Audio kept before the name's first word, so its start isn't clipped.
 PRE_ROLL_SECONDS = 0.25
@@ -56,12 +62,20 @@ PRE_ROLL_SECONDS = 0.25
 TAIL_SILENCE_SECONDS = 1.0
 CAPTURE_MAX_SECONDS = 20.0
 VAD_THRESHOLD = 0.5
+# "Ombri, acorda": Vosk ends the utterance at the comma's pause. Firing there lost
+# "acorda", spoken before the client's recording had opened (owner's retakes,
+# 2026-11-04). So a bare name waits this long for more speech before it fires.
+NAME_PAUSE_SECONDS = 0.8
 
 MODELS = {
     "en": ("vosk-model-small-en-us-0.15",
            "30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498"),
     "pt": ("vosk-model-small-pt-0.3",
            "6e1ce909032e1afa7a88e68a3d628ecafff302bdf195befab308826c395e93b7"),
+    # Pinned 2026-11-04 from alphacephei.com (39,817,833 bytes). An empty
+    # hash makes ensure_model() refuse and the stop words fall back to pt.
+    "es": ("vosk-model-small-es-0.42",
+           "09b239888f633ef2f0b4e09736e3d9936acfd810bc65d53fad45261762c6511f"),
 }
 MODEL_URL = "https://alphacephei.com/vosk/models/{name}.zip"
 
@@ -70,10 +84,26 @@ def models_dir() -> Path:
     return Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "Parca" / "models"
 
 
+def listener_language(language: str) -> str:
+    """The VoiceListener's language for a voice's language: one with stop
+    words of its own, else Portuguese (the original)."""
+    return language if language in SHUSH_PHRASES else "pt"
+
+
+def shush_model_language(language: str) -> str:
+    """Which model hears the stop words: the language's own when its hash is
+    pinned (MODELS), else the Portuguese one."""
+    name, sha = MODELS.get(language, ("", ""))
+    return language if sha else "pt"
+
+
 def ensure_model(lang: str, base: Path | None = None, fetch=None) -> Path:
     """The unpacked model folder, downloading and checking it first if needed.
-    Raises on a failed download or a hash mismatch (nothing is unpacked then)."""
+    Raises on a failed download or a hash mismatch (nothing is unpacked then),
+    and on a model whose hash isn't pinned yet (never trusted on faith)."""
     name, sha = MODELS[lang]
+    if not sha:
+        raise ValueError(f"modelo {name}: sem sha256 pinado em MODELS")
     base = base or models_dir()
     target = base / name
     if (target / "am").exists() or (target / "conf").exists():
@@ -156,7 +186,7 @@ def match(words: list[dict], mode: str, shush: list[str]) -> str | None:
 
 class VoiceListener:
     def __init__(self, language: str, base: Path | None = None) -> None:
-        self.language = "en" if language == "en" else "pt"
+        self.language = listener_language(language)
         self.base = base
         self.wake = VoiceTrigger("voz:ei-ombri")
         self.shush = VoiceTrigger("voz:chega")
@@ -194,7 +224,8 @@ class VoiceListener:
             SetLogLevel(-1)
             vad = _SileroOnnx(VAD_MODEL_PATH)  # its own instance: the recorder's keeps state
             en = Model(str(ensure_model("en", self.base)))
-            shush_model = en if self.language == "en" else Model(str(ensure_model("pt", self.base)))
+            shush_lang = shush_model_language(self.language)
+            shush_model = en if shush_lang == "en" else Model(str(ensure_model(shush_lang, self.base)))
         except Exception as exc:  # noqa: BLE001 - the feature just stays off
             self.error = str(exc)
             return
@@ -205,6 +236,7 @@ class VoiceListener:
         rec, rec_mode, rec_start = None, None, 0
         capture_from: int | None = None  # sample index while capturing a question
         quiet = 0.0
+        name_only = False  # capturing, and nothing has followed the name yet
         try:
             stream = sd.InputStream(samplerate=RATE, channels=1, dtype="int16", blocksize=BLOCK)
             stream.start()
@@ -228,7 +260,12 @@ class VoiceListener:
                     for i in range(0, n - 511, 512):
                         speech = vad(mono[i:i + 512].astype(np.float32) / 32768.0) >= VAD_THRESHOLD
                         quiet = 0.0 if speech else quiet + 512 / RATE
-                    if quiet >= TAIL_SILENCE_SECONDS or total - capture_from >= CAPTURE_MAX_SECONDS * RATE:
+                        name_only = name_only and not speech
+                    if name_only:
+                        if quiet >= NAME_PAUSE_SECONDS:
+                            self.wake.fire(None)  # just the name: the client records the question
+                            capture_from, rec_mode, name_only = None, "restart", False
+                    elif quiet >= TAIL_SILENCE_SECONDS or total - capture_from >= CAPTURE_MAX_SECONDS * RATE:
                         first = max(capture_from, total - len(ring) + 1)
                         self.wake.fire(to_wav(ring[np.arange(first, total) % len(ring)]))
                         capture_from, rec_mode = None, "restart"
@@ -246,9 +283,8 @@ class VoiceListener:
                 hit = match(words, mode, shush) if words else None
                 if hit == "shush":
                     self.shush.fire()
-                elif hit == "wake":
-                    self.wake.fire(None)  # just the name: the client records the question
-                elif hit == "wake+":
+                elif hit in ("wake", "wake+"):
+                    name_only = hit == "wake"
                     first = rec_start - n + int(words[0]["start"] * RATE) - int(PRE_ROLL_SECONDS * RATE)
                     capture_from, quiet = max(first, total - len(ring) + 1, 0), 0.0
                     vad.reset_states()

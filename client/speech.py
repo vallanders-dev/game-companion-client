@@ -17,6 +17,8 @@ import time
 import wave
 from pathlib import Path
 
+import numpy as np
+
 TTS_PCM_FORMAT = "pcm_24000"
 TTS_PCM_RATE = 24_000
 
@@ -50,6 +52,9 @@ _WRITE_SLICE_BYTES = TTS_PCM_RATE * 2 // 10  # 100 ms of mono int16
 # that AudioOut is closed/interrupted (client/ducking.py lowers the game in
 # between). Set once by client.main; must be fast and never raise into audio.
 speaking_hook = None
+# Called with each slice's loudness, 0..1, about 10 times a second while audio
+# plays (the main window's orb follows it). Same rules as speaking_hook.
+level_hook = None
 
 
 def _notify_speaking(started: bool) -> None:
@@ -58,6 +63,16 @@ def _notify_speaking(started: bool) -> None:
         try:
             hook(started)
         except Exception:  # noqa: BLE001 - ducking must never break playback
+            pass
+
+
+def _notify_level(piece: bytes) -> None:
+    hook = level_hook
+    if hook is not None:
+        try:
+            samples = np.frombuffer(piece, dtype=np.int16, count=len(piece) // 2).astype(np.float32) / 32768.0
+            hook(float(np.sqrt(np.mean(samples * samples))) if samples.size else 0.0)
+        except Exception:  # noqa: BLE001 - the orb must never break playback
             pass
 
 
@@ -134,6 +149,7 @@ class AudioOut:
                     self.first_write_at = time.perf_counter()
                     _notify_speaking(True)
                 piece = pcm[i:i + _WRITE_SLICE_BYTES]
+                _notify_level(piece)
                 self._stream.write(piece)
                 self.bytes_written += len(piece)
         return True
