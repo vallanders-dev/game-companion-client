@@ -56,11 +56,13 @@ from client import capture
 from client.capture import (
     GAME_CHANGED,
     HotkeyManager,
+    NoForegroundGame,
     capture_game_window_jpeg,
     detect_game,
     foreground_game_needs_admin,
     is_no_game_answer,
     load_game_aliases,
+    log_capture_failure,
     prompt_scene,
     remember_game_for_foreground,
     resolve_spoken_game,
@@ -456,17 +458,40 @@ def _speak_line(name: str, barge: "BargeInWatcher | None", *, fallback_tone: boo
     return fired
 
 
+def _capture_for_turn(settings) -> tuple[bytes | None, str]:
+    """This turn's screenshot, plus WHY there isn't one ("" when there is).
+
+    The reason travels with the question (client/net.py `ask(no_screen_reason=)`)
+    so the ANSWER can say the true thing - "o jogo nao estava na frente" -
+    instead of the old generic line, which claimed the image had not arrived
+    in time even when none was ever taken (owner, 2026-11-17: a screen
+    question came back as "I can't read images", which was never true).
+    Every failure also goes to capture.log, because a console line in a
+    window the player never sees is not evidence.
+
+    Still no whole-monitor fallback: no recognized game in front = no
+    picture, said out loud. Honest degradation, CLAUDE.md Principle 2."""
+    try:
+        return capture_game_window_jpeg(settings.game_aliases_path), ""
+    except NoForegroundGame as exc:
+        print(t("capture_failed"))
+        telemetry(f"  (captura falhou: {exc})")
+        log_capture_failure(exc)
+        return None, "fora_do_jogo"
+    except Exception as exc:  # noqa: BLE001
+        print(t("capture_failed"))
+        telemetry(f"  (captura falhou: {exc})")
+        log_capture_failure(exc)
+        return None, "falha_na_captura"
+
+
 def _remember_note(session: ServerSession, settings, game: str, barge: "BargeInWatcher | None"):
     """The F6 flow - see `client.net.ServerSession.remember()`'s docstring
     for the `on_state("ouvindo")` -> record -> `turn_continue` protocol.
     Returns a trigger pressed during the closing line (the loop's next
     command), or None."""
     print(t("noting", game=game))
-    screenshot = None
-    try:
-        screenshot = capture_game_window_jpeg(settings.game_aliases_path)
-    except Exception as exc:  # noqa: BLE001
-        telemetry(f"  (captura falhou: {exc})")
+    screenshot, _ = _capture_for_turn(settings)
 
     print(t("speak_note", hang=settings.mic_silence_hang))
     _UI.state("ouvindo")
@@ -933,14 +958,11 @@ def cmd_ask(_args: argparse.Namespace) -> int:
         heard_in_window = False  # this question came from the follow-up window, no key pressed
         question_text = None
         screenshot = None
+        no_screen_reason = ""  # why there is no picture, told to the answer
         wav = None
         if used_trigger:
             print(t("capturing"))
-            try:
-                screenshot = capture_game_window_jpeg(settings.game_aliases_path)
-            except Exception as exc:  # noqa: BLE001
-                print(t("capture_failed"))
-                telemetry(f"  (captura falhou: {exc})")
+            screenshot, no_screen_reason = _capture_for_turn(settings)
             wake_audio = _VOICE.wake.take_audio() if _VOICE is not None and fired is _VOICE.wake else None
             from_wake = wake_audio is not None
             if fired is not None and _VOICE is not None and fired is _VOICE.wake:
@@ -1034,7 +1056,7 @@ def cmd_ask(_args: argparse.Namespace) -> int:
         try:
             result = session.ask(
                 turn_id, game, wav_bytes=None if live_id else wav, question_text=question_text,
-                screenshot_bytes=screenshot, live_id=live_id,
+                screenshot_bytes=screenshot, no_screen_reason=no_screen_reason, live_id=live_id,
                 wake=from_wake, record_reply=record_reply if wav else None, follow_up=heard_in_window,
                 only_if_report=probe_turn,
                 controls=gamepad.input_kind(from_pad=fired is gamepad) if gamepad.available else "keyboard",

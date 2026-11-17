@@ -507,9 +507,13 @@ class Ui:
                             ui(L, "recap_yes"), ui(L, "recap_no"),
                             on_yes=lambda: _send("recap_save:" + offer_id), seconds=RECAP_NOTICE_SECONDS)
         elif kind == "game_ask":
-            # Ombri is asking "qual jogo?" out loud; the card offers the list too.
-            self.notice.pop(ui(L, "pick_title"), ui(L, "game_ask_body"), ui(L, "game_ask_list"), None,
-                            on_yes=self.open_picker)
+            # Ombri is asking "qual jogo?" out loud - the card only SHOWS that,
+            # it no longer offers a list to pick from (owner, 2026-11-17:
+            # "this needs to be as easy as possible for the gamer... we do not
+            # need the pop-up about the game we're playing"). The answer is
+            # spoken; the picker stays reachable on purpose from the game card's
+            # "Trocar" and the tray's "Jogo", both of which need a click.
+            self.notice.pop(ui(L, "pick_title"), ui(L, "game_ask_body"), None, None)
         elif kind == "recap_saved":
             self.notice.pop(ui(L, "recap_saved_title"), ui(L, "recap_saved_body"), None, None, seconds=6)
         elif kind == "recap_failed":

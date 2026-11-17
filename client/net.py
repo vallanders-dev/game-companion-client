@@ -431,6 +431,7 @@ class ServerSession:
         wav_bytes: bytes | None = None,
         question_text: str | None = None,
         screenshot_bytes: bytes | None = None,
+        no_screen_reason: str = "",
         allow_spoilers: bool | None = None,
         cancel: threading.Event | None = None,
         on_state=None,
@@ -490,6 +491,11 @@ class ServerSession:
             msg["can_confirm"] = True
         if follow_up:
             msg["follow_up"] = True
+        if no_screen_reason and screenshot_bytes is None:
+            # why this question has no picture, so the answer can say it out loud
+            # ("fora_do_jogo" = the game was not in the foreground; see
+            # client/main.py `_capture_for_turn()` and server/companion.NO_SCREEN_LINES)
+            msg["no_screen_reason"] = no_screen_reason
         if live_id:
             msg["live_id"] = live_id  # heard live (LiveTranscript): the server has the words, no WAV needed
         if only_if_report:

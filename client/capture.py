@@ -943,10 +943,15 @@ def _match_foreground_window(aliases_path: Path) -> tuple[int, str] | None:
         if not hwnd or not title:
             return None
         _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        # 2026-11-17: Windows can refuse the exe path (a packaged or
+        # protected process, a race while it is still starting). That used to
+        # abort the WHOLE lookup, so a game sitting right there in the
+        # foreground went unrecognized - no name, and
+        # `capture_game_window_jpeg()` raised, so the turn ran with no
+        # screenshot at all. The TITLE pass needs no exe path; only the
+        # passes that genuinely do are skipped now.
         exe_path = _process_image_path(pid)
-        if exe_path is None:
-            return None
-        process_name = exe_path.name.lower()
+        process_name = exe_path.name.lower() if exe_path is not None else ""
     except Exception:  # noqa: BLE001 - pywin32 missing, no window, ...
         return None
 
@@ -983,6 +988,10 @@ def _match_foreground_window(aliases_path: Path) -> tuple[int, str] | None:
     # and a curated match always wins first. The returned name may not be a
     # game_aliases.json canonical string - see detect_game()'s docstring for
     # why that's safe.
+    # Passes 3-5 all read the exe; the title pass above did not need it.
+    if exe_path is None:
+        return None
+
     launcher_name = launcher_lookup.launcher_game_name(exe_path)
     if launcher_name:
         return hit(launcher_name)
@@ -1105,6 +1114,67 @@ def _window_bounds(hwnd) -> dict | None:
     return {"left": left, "top": top, "width": width, "height": height}
 
 
+class NoForegroundGame(RuntimeError):
+    """`capture_game_window_jpeg()` found no recognized game in front.
+
+    A separate class from every other capture failure (a broken mss grab, no
+    display, an encode error) for one reason: the caller can then tell the
+    player the TRUE thing - "o jogo nao estava na frente" - instead of a
+    generic "nao consegui ver a tela", and the reason travels with the
+    question so the ANSWER can say it too (main.py `_capture_for_turn()`,
+    server/companion.py `NO_SCREEN_LINES`). Owner, 2026-11-17: a screen
+    question answered "I can't read images", which was never true."""
+
+
+def foreground_window_debug() -> str:
+    """One line describing what is actually in front - title, exe, whether it
+    fills its monitor - for capture.log. DIAGNOSIS ONLY: nothing decides
+    anything from this, and it never raises."""
+    try:
+        import win32gui
+        import win32process
+
+        hwnd = win32gui.GetForegroundWindow()
+        if not hwnd:
+            return "janela=nenhuma"
+        title = (win32gui.GetWindowText(hwnd) or "").strip()
+        try:
+            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            exe = _process_image_path(pid)
+        except Exception:  # noqa: BLE001
+            exe = None
+        return (f"titulo={title[:80]!r} exe={(exe.name if exe else None)!r} "
+                f"tela_cheia={_window_fills_monitor(hwnd)}")
+    except Exception as exc:  # noqa: BLE001
+        return f"janela=desconhecida ({exc})"
+
+
+CAPTURE_LOG_PATH = REMEMBERED_GAMES_PATH.parent / "capture.log"
+CAPTURE_LOG_MAX_LINES = 200
+
+
+def log_capture_failure(exc: BaseException) -> None:
+    """Append one timestamped line - the error plus what was really in front -
+    to %APPDATA%/Parca/capture.log, keeping the last
+    CAPTURE_LOG_MAX_LINES.
+
+    Why a file (owner, 2026-11-17): a capture failure existed only as a line
+    in a console window the player never looks at, so "Ombri couldn't see my
+    screen" left NO evidence behind by the time it was reported - the cause
+    had to be read out of the source instead of out of a log. Never raises: a
+    log that fails must not break the turn."""
+    try:
+        line = (f"{time.strftime('%Y-%m-%dT%H:%M:%S')}\t{type(exc).__name__}: {exc}\t"
+                f"{foreground_window_debug()}\n")
+        CAPTURE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        old: list[str] = []
+        if CAPTURE_LOG_PATH.exists():
+            old = CAPTURE_LOG_PATH.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+        CAPTURE_LOG_PATH.write_text("".join(old[-(CAPTURE_LOG_MAX_LINES - 1):]) + line, encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def capture_game_window_jpeg(aliases_path: Path, max_width: int = _MAX_WIDTH) -> bytes:
     """The real turn-taking entry point (see module docstring): screenshots
     ONLY the recognized foreground game window, cropped to its bounds -
@@ -1114,7 +1184,7 @@ def capture_game_window_jpeg(aliases_path: Path, max_width: int = _MAX_WIDTH) ->
     is the failure path - never a silent whole-monitor fallback."""
     rect = get_foreground_game_window_rect(aliases_path)
     if rect is None:
-        raise RuntimeError("nenhum jogo reconhecido em primeiro plano — captura pulada")
+        raise NoForegroundGame("nenhum jogo reconhecido em primeiro plano — captura pulada")
     return capture_screenshot_jpeg(max_width=max_width, region=rect)
 
 
