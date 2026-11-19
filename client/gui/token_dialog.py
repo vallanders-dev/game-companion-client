@@ -520,7 +520,8 @@ def main(argv: list[str] | None = None) -> int:
 
     claim_taskbar_identity()
     app = QApplication.instance() or QApplication(sys.argv[:1])  # noqa: F841 - must exist before widgets
-    app.setWindowIcon(QIcon(QPixmap.fromImage(sphere_image(256))))
+    from client.gui import indicator
+    app.setWindowIcon(indicator.app_icon())
     ensure_fonts_loaded()
     dialog = TokenDialog(load_client_settings().server_url, args.reason)
     dialog.show()

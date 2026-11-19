@@ -55,6 +55,7 @@ from PySide6.QtWidgets import (
 
 from client.gui.fonts import BODY_FAMILY, HEADING_FAMILY, ensure_fonts_loaded
 from client.gui.main_window import CHIP_TEXT, TEXT, TEXT_2, MainWindow, line_icon
+from client.gui import indicator
 from client.gui.orb import claim_taskbar_identity, sphere_image
 from client.gui.overlay import DARK_THEME, HudState, OverlayWindow
 from client.gui.ui_texts import ui
@@ -150,7 +151,7 @@ class Notice(QWidget):
         head = QHBoxLayout()
         head.setSpacing(8)
         dot = QLabel()
-        dot.setPixmap(QPixmap.fromImage(sphere_image(28)).scaled(
+        dot.setPixmap(QPixmap.fromImage(indicator.icon_image(28)).scaled(
             14, 14, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
         app = QLabel("Ombri")
         app.setStyleSheet(f"font-size: 12px; color: {CHIP_TEXT};")
@@ -321,7 +322,7 @@ class TrayHeader(QWidget):
         row.setContentsMargins(12, 10, 12, 8)
         row.setSpacing(10)
         orb = QLabel()
-        orb.setPixmap(QPixmap.fromImage(sphere_image(56)).scaled(
+        orb.setPixmap(QPixmap.fromImage(indicator.icon_image(56)).scaled(
             28, 28, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
         row.addWidget(orb)
         col = QVBoxLayout()
@@ -357,7 +358,7 @@ class Ui:
         self.window.note_delete_requested.connect(lambda note_id: _send("notes_delete:" + note_id))
         self.window.game_pick_requested.connect(self.open_picker)
 
-        self.tray = QSystemTrayIcon(QIcon(QPixmap.fromImage(sphere_image(64))))
+        self.tray = QSystemTrayIcon(indicator.tray_icon())
         self.tray.setToolTip("Ombri")
         self.menu = QMenu()
         self.menu.setWindowFlags(self.menu.windowFlags() | Qt.WindowType.FramelessWindowHint
@@ -421,7 +422,7 @@ class Ui:
         if not self.told_tray:
             self.told_tray = True
             self.tray.showMessage("Ombri", ui(self.window.lang, "still_running"),
-                                  QIcon(QPixmap.fromImage(sphere_image(64))), 4000)
+                                  indicator.tray_icon(), 4000)
 
     def _show_state(self) -> None:
         shown = "pausado" if self.paused else self.state

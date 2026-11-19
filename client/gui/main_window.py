@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from client.gui import indicator
 from client.gui.fonts import BODY_FAMILY, HEADING_FAMILY, ensure_fonts_loaded
 from client.gui.orb import HALO_STATES, breathing_scale, draw_sphere, draw_thinking_halo, sphere_image, state_color
 from client.gui.speaking import make_design
@@ -38,8 +39,8 @@ TEXT_2 = "#A3A8B3"
 TEXT_3 = "#8A919E"
 CHIP_TEXT = "#C9CDD4"
 ACCENT = "#FF6B4A"
-OK_GREEN = "#34D399"
-WARN_AMBER = "#F5B740"
+OK_GREEN = "#5B7CFF"    # connected: the palette's blue (2026-11-19, was green)
+WARN_AMBER = "#FF6B4A"  # offline: coral (was amber)
 
 QSS = f"""
 QWidget#root {{ background: {BG}; border-radius: {RADIUS}px; }}
@@ -179,6 +180,8 @@ class OrbWidget(QWidget):
         self._halo_radius = halo or (ring + 4 if ring else None)
         self._halo = 0.0
         self._speaking = make_design()
+        self._eyes = indicator.custom()  # eyes or shadow; client/gui/indicator.py: "orb" brings the sphere back
+        self._level = 0.0  # the voice's loudness for the eyes' bounce, decays between feeds
         self._t0 = time.monotonic()
         self._timer = QTimer(self)
         # The default timer rounds 33 ms up to ~47 on Windows: 21 fps, measured 2026-11-06.
@@ -192,6 +195,7 @@ class OrbWidget(QWidget):
     def feed_voice(self, level: float) -> None:
         if self.isVisible():
             self._speaking.feed_level(level, time.monotonic() - self._t0)
+            self._level = max(self._level, level)
 
     def showEvent(self, event) -> None:  # noqa: N802 - animate only while visible
         self._timer.start(33)
@@ -205,6 +209,12 @@ class OrbWidget(QWidget):
         p = QPainter(self)
         t = time.monotonic() - self._t0
         c = QPointF(self.width() / 2, self.height() / 2)
+
+        if self._eyes:
+            self._level *= 0.82  # ~10 feeds a second against ~30 frames: a short tail
+            indicator.draw(p, c, self._radius * 2, self.state, t, level=self._level)
+            p.end()
+            return
 
         def draw_orb(q: QPainter) -> None:
             draw_sphere(q, c, self._radius * breathing_scale(self.state, t), state_color(self.state),
@@ -230,7 +240,7 @@ class TitleBar(QWidget):
         row.setContentsMargins(16, 0, 6, 0)
         row.setSpacing(10)
         dot = QLabel()
-        dot.setPixmap(QPixmap.fromImage(sphere_image(28)).scaled(
+        dot.setPixmap(QPixmap.fromImage(indicator.icon_image(28)).scaled(
             14, 14, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
         row.addWidget(dot)
         name = _label("Ombri", size=15, weight=600, heading=True)
@@ -349,7 +359,7 @@ class MainWindow(QWidget):
         ensure_fonts_loaded()
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setWindowTitle("Ombri")
-        self.setWindowIcon(QIcon(QPixmap.fromImage(sphere_image(256))))
+        self.setWindowIcon(indicator.app_icon())
         self.setFixedSize(WINDOW_W, WINDOW_H)
         self.setStyleSheet(QSS)
 
@@ -404,7 +414,9 @@ class MainWindow(QWidget):
         col.setSpacing(16)
         # The widget is larger than the sphere so the glow fades out inside
         # it (a smaller box clipped the glow into a visible square).
-        self.w_orb = OrbWidget(216, 56, glow=0.8, halo=76)
+        # (box, half the character's size): the shadow is the app's face, so it gets more room than the eyes.
+        size = {"shadow": (140, 64), "eyes": (96, 36)}.get(indicator.STYLE)
+        self.w_orb = OrbWidget(*size) if size else OrbWidget(216, 56, glow=0.8, halo=76)
         col.addWidget(self.w_orb, 0, Qt.AlignmentFlag.AlignHCenter)
         self.w_title = _label(size=26, weight=600, heading=True)
         self.w_title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
@@ -457,11 +469,14 @@ class MainWindow(QWidget):
         hero = QVBoxLayout()
         hero.setSpacing(8)
         # The glow reaches 124 px at the top of the pulse; a smaller box cuts it into a square.
-        self.s_orb = OrbWidget(256, 66, ring=88, glow=0.8)
+        eyes = indicator.custom()
+        size = {"shadow": (132, 60), "eyes": (104, 40)}.get(indicator.STYLE)
+        self.s_orb = OrbWidget(*size) if size else OrbWidget(256, 66, ring=88, glow=0.8)
         hero.addWidget(self.s_orb, 0, Qt.AlignmentFlag.AlignHCenter)
         self.s_state = _label(size=22, weight=600, heading=True)
         self.s_state.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        hero.addSpacing(-34)
+        if not eyes:
+            hero.addSpacing(-34)  # the sphere's glow box is taller than the sphere
         hero.addWidget(self.s_state)
         self.s_hint = _label(size=14, color=TEXT_2)
         self.s_hint.setAlignment(Qt.AlignmentFlag.AlignHCenter)
@@ -632,7 +647,10 @@ class MainWindow(QWidget):
     def _refresh(self) -> None:
         L = self.lang
         kw = {"ask": self.keys["ask"], "note": self.keys["note"]}
-        color = state_color(self.state).name()
+        if indicator.custom():  # one colour with the character: coral while busy, grey at rest
+            color = TEXT_2 if self.state in ("idle", "pausado") else ACCENT
+        else:
+            color = state_color(self.state).name()
         self.s_orb.set_state(self.state)
         self.w_orb.set_state(self.state)
         self.s_state.setText(ui(L, f"state_{self.state}"))

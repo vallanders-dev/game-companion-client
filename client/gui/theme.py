@@ -6,7 +6,8 @@ either form into a QColor at paint time. Accent is a warm coral, chosen to
 not read as a copy of Discord's blurple (#5865F2) or Steam's blue
 (#1b2838 / #66c0f4) — kept identical across both palettes for brand
 consistency (same idea as macOS Control Center reusing one accent
-regardless of light/dark). State colors are gray/green/amber/coral, one
+regardless of light/dark). State colors are gray/blue/magenta/coral (the
+shadow head's neon rim, owner 2026-11-19; was gray/green/amber/coral), one
 per HUD sub-state; overlay.py pairs each with a distinct icon shape too
 (ring/circle/diamond/bars), since color alone isn't enough (colorblind
 accessibility) — see overlay.py's StateIndicator.
@@ -64,8 +65,8 @@ DARK_THEME = Theme(
     corner_radius=16,
     states=StateColors(
         idle="#8A919E",  # the mockup's "Pronto" grey (was #6B7280)
-        listening="#34D399",
-        thinking="#F5B740",
+        listening="#5B7CFF",   # 2026-11-19: the shadow head's neon palette
+        thinking="#E25DD0",    # (coral / magenta / blue), was green / amber
         speaking="#FF6B4A",
     ),
 )

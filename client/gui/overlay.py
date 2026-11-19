@@ -80,6 +80,7 @@ the display in true exclusive mode would still hide any window.
 from __future__ import annotations
 
 import ctypes
+import math
 import re
 import sys
 
@@ -90,6 +91,7 @@ from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath
 from PySide6.QtWidgets import QApplication, QWidget
 
 from client.gui.global_keys import AsyncKeyPoller
+from client.gui import indicator
 from client.gui.orb import breathing_scale, draw_sphere, state_color
 from client.gui.theme import DARK_THEME, Theme
 
@@ -154,6 +156,21 @@ TOPMOST_REASSERT_MS = 1000
 # (It was a glow with waveform bars / orbiting dots from 2026-09-25.)
 ORB_ANIM_MS = 33
 ORB_SPHERE_RADIUS = 32  # the mockup's 64 px in-game orb, centred in ORB_OUTER_DIAMETER
+# The eyes (client/gui/indicator.py, 2026-11-18): a 36 px dark tile, about a Discord
+# voice avatar, with no glow to fade out, so a small margin is enough.
+EYES_TILE = 36
+EYES_MARGIN = 6
+# The shadow creature (2026-11-19): no tile, 44 px tall, its rim glow needs a little room.
+SHADOW_BOX = 44
+
+
+def _footprint() -> tuple[float, float]:
+    """(diameter, margin) of the painted indicator: the eyes' tile or the sphere's box."""
+    if indicator.STYLE == "shadow":
+        return SHADOW_BOX, EYES_MARGIN
+    if indicator.custom():
+        return EYES_TILE, EYES_MARGIN
+    return ORB_OUTER_DIAMETER, OverlayWindow.SHADOW_MARGIN
 
 # --------------------------------------------------------------------- #
 # Presence opacity (Wispr-style idle fade).
@@ -255,7 +272,8 @@ class OverlayWindow(QWidget):
         usage_font.setPointSizeF(USAGE_FONT_POINT_SIZE)
         sample_w = QFontMetrics(usage_font).horizontalAdvance(USAGE_WIDTH_SAMPLE) + USAGE_PILL_PADDING
 
-        orb_footprint = ORB_OUTER_DIAMETER + 2 * self.SHADOW_MARGIN
+        diameter, margin = _footprint()
+        orb_footprint = diameter + 2 * margin
         w = max(orb_footprint, sample_w)
         h = orb_footprint + USAGE_ROW_GAP + USAGE_ROW_HEIGHT
         self.setGeometry(self._initial_geometry(w, h))
@@ -499,11 +517,22 @@ class OverlayWindow(QWidget):
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        m = self.SHADOW_MARGIN
-        orb_footprint = ORB_OUTER_DIAMETER + 2 * m
+        diameter, m = _footprint()
+        orb_footprint = diameter + 2 * m
         orb_left = (self.width() - orb_footprint) / 2  # window is wider than the orb, to fit the usage pill's text
-        outer = QRectF(orb_left + m, m, ORB_OUTER_DIAMETER, ORB_OUTER_DIAMETER)
+        outer = QRectF(orb_left + m, m, diameter, diameter)
         key = _hud_key(self.state)
+        if indicator.custom():
+            # Calm poses (nothing extra moves in game); speaking bounces on a canned beat,
+            # as the sphere's pulse did - the overlay gets no voice level.
+            beat = 0.5 + 0.5 * math.sin(2 * math.pi * self._anim_phase / 0.55)
+            ring = QColor(state_color("falando"))
+            ring.setAlphaF(0.45)
+            indicator.draw(painter, outer.center(), diameter, key, self._anim_phase, level=beat, calm=True,
+                      backing=_parse_color(self.theme.surface_fill), ring=ring if self._click_through else None)
+            self._paint_usage(painter, orb_footprint)
+            painter.end()
+            return
         draw_sphere(painter, outer.center(), ORB_SPHERE_RADIUS * breathing_scale(key, self._anim_phase),
                     state_color(key), glow=1.0,
                     # Click-through cue: the main window's quiet ring (thin, solid, the orb's own colour at
