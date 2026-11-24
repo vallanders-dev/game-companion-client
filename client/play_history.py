@@ -3,6 +3,15 @@ the morning report ("Ombri, acorda!"): Steam's own last-played dates and hours
 and Minecraft's logs in the default .minecraft folder (the mode of the last
 session, the player's own newest advancement).
 
+Since 2026-11-23 (Tony: "HoYoverse and all other game launchers"):
+- HoYoverse: the date of each game's own log file in AppData\\LocalLow (only
+  the file's date is read, never its lines), for a closed list of games.
+- Every other launcher (Epic, Battle.net, EA, Ubisoft, Riot, Xbox, GOG...):
+  none of them keeps last-played dates in a file we can trust, so Ombri
+  counts what it sees itself - the game it detects in front while it runs
+  (`seen()`, from client/main.py), last time and minutes, in
+  play_seen.json next to settings.json. Only after the player's yes.
+
 Nothing is read until the player says yes: the first "Ombri, acorda!" asks
 (server/session.py), a clear yes sets `"play_history": true` in settings.json, a
 clear no sets false and it never asks again. The settings window turns it on or
@@ -32,6 +41,25 @@ MAX_LOGS = 20
 MAX_LOG_BYTES = 8 * 1024 * 1024
 MINECRAFT = "Minecraft"
 NAMES_PATH = USER_SETTINGS_DIR / "steam_names.json"
+SEEN_PATH = USER_SETTINGS_DIR / "play_seen.json"
+SEEN_GAP_SECONDS = 120     # two sightings further apart than this aren't one session
+SEEN_TICK_SECONDS = 5      # main.py may report every poll; one count per 5 s is plenty
+SEEN_SAVE_SECONDS = 60
+SEEN_MAX = 200
+
+# (publisher folder under AppData\LocalLow, game folder) -> the game's name as
+# client/game_aliases.json writes it, so Ombri's own sightings merge with it.
+HOYOVERSE = {
+    ("miHoYo", "Genshin Impact"): "Genshin Impact",
+    ("miHoYo", "原神"): "Genshin Impact",
+    ("Cognosphere", "Star Rail"): "Honkai: Star Rail",
+    ("miHoYo", "崩坏：星穹铁道"): "Honkai: Star Rail",
+    ("miHoYo", "ZenlessZoneZero"): "Zenless Zone Zero",
+    ("miHoYo", "绝区零"): "Zenless Zone Zero",
+    ("miHoYo", "Honkai Impact 3rd"): "Honkai Impact 3rd",
+    ("miHoYo", "崩坏3"): "Honkai Impact 3rd",
+}
+HOYOVERSE_LOGS = ("output_log.txt", "Player.log", "Player-prev.log")
 
 _TOKEN = re.compile(r'"((?:[^"\\]|\\.)*)"|([{}])')
 # Minecraft's own chat lines (chat.type.advancement.*, assets/minecraft/lang): en, pt_br, pt_pt, es_es/es_mx, es_ar.
@@ -197,11 +225,116 @@ def minecraft_summary(folder: Path) -> dict:
     return out
 
 
+def hoyoverse_games(local_low: Path) -> list[dict]:
+    """HoYoverse games by the date of their own log file (the file is never opened)."""
+    found: dict[str, int] = {}
+    for (publisher, folder), name in HOYOVERSE.items():
+        for log in HOYOVERSE_LOGS:
+            try:
+                when = int((local_low / publisher / folder / log).stat().st_mtime)
+            except OSError:
+                continue
+            found[name] = max(found.get(name, 0), when)
+    return [{"name": n, "last": t, "minutes": 0, "source": "hoyoverse"} for n, t in found.items()]
+
+
+def _load_seen(path: Path | None = None) -> dict:
+    try:
+        data = json.loads((path or SEEN_PATH).read_text("utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def seen_games(data: dict | None = None) -> list[dict]:
+    """What Ombri itself saw in front, any launcher."""
+    data = _load_seen() if data is None else data
+    out = []
+    for name, rec in data.items():
+        if isinstance(name, str) and name.strip() and isinstance(rec, dict):
+            try:
+                out.append({"name": name, "last": int(rec.get("last", 0)),
+                            "minutes": int(float(rec.get("minutes", 0))), "source": "ombri"})
+            except (TypeError, ValueError):
+                continue
+    return [g for g in out if g["last"] > 0]
+
+
+_seen_lock = threading.Lock()
+_seen_state: dict = {"data": None, "game": None, "at": 0.0, "saved": 0.0, "on": None, "checked": 0.0}
+
+
+def seen(game: str | None, now: float | None = None, path: Path | None = None) -> None:
+    """The game client/main.py detected in front just now (None: no game).
+    Counts last time and minutes, only while the play report is on. Never
+    raises: the voice loop calls it."""
+    try:
+        _seen(game, time.time() if now is None else now, path)
+    except Exception:  # noqa: BLE001 - a missed count never stops a turn
+        pass
+
+
+def _seen(game: str | None, now: float, path: Path | None) -> None:
+    st = _seen_state
+    with _seen_lock:
+        if game == st["game"] and now - st["at"] < SEEN_TICK_SECONDS:
+            return
+        if st["on"] is None or now - st["checked"] >= SEEN_SAVE_SECONDS:
+            st["on"], st["checked"] = enabled(), now
+        if not st["on"] or not game:
+            st["game"], st["at"] = None, now
+            return
+        if st["data"] is None:
+            st["data"] = _load_seen(path)
+        rec = st["data"].setdefault(game, {"last": 0, "minutes": 0.0})
+        if st["game"] == game and 0 < now - st["at"] <= SEEN_GAP_SECONDS:
+            rec["minutes"] = float(rec.get("minutes", 0)) + (now - st["at"]) / 60.0
+        rec["last"] = int(now)
+        st["game"], st["at"] = game, now
+        if now - st["saved"] >= SEEN_SAVE_SECONDS:
+            st["saved"] = now
+            _save_seen(st["data"], path or SEEN_PATH)
+
+
+def _save_seen(data: dict, path: Path) -> None:
+    if len(data) > SEEN_MAX:
+        for name in sorted(data, key=lambda n: data[n].get("last", 0))[:len(data) - SEEN_MAX]:
+            del data[name]
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def merge_games(rows: list[dict]) -> list[dict]:
+    """One row per game (same name, any case): the newest date, the most
+    minutes, and every source it was counted in."""
+    by_key: dict[str, dict] = {}
+    for g in rows:
+        key = " ".join(g["name"].lower().split())
+        src = g.get("source", "steam")
+        have = by_key.get(key)
+        if have is None:
+            by_key[key] = {**g, "sources": {src}}
+        else:
+            have["last"] = max(have["last"], g["last"])
+            have["minutes"] = max(have["minutes"], g["minutes"])
+            have["sources"].add(src)
+    return list(by_key.values())
+
+
 def summarize(games: list[dict], minecraft: dict, now: float) -> dict | None:
-    """The whole payload the server gets; None with nothing to report."""
-    played = list(games)
+    """The whole payload the server gets; None with nothing to report.
+    `games` rows may say their "source" (steam when they don't)."""
+    played = merge_games(games)
     if minecraft.get("last"):
-        played.append({"name": MINECRAFT, "last": minecraft["last"], "minutes": 0})
+        known = next((g for g in played if g["name"] == MINECRAFT), None)
+        if known is None:
+            played.append({"name": MINECRAFT, "last": minecraft["last"], "minutes": 0, "sources": {"minecraft"}})
+        else:
+            known["last"] = max(known["last"], minecraft["last"])
+            known["sources"].add("minecraft")
     if not played:
         return None
     last = max(played, key=lambda g: g["last"])
@@ -212,9 +345,8 @@ def summarize(games: list[dict], minecraft: dict, now: float) -> dict | None:
         "recent": len(recent),
         "months": RECENT_MONTHS,
         # Where the count comes from, said aloud: games on Epic or a console aren't in it.
-        "counted_in": [src for src, seen in (("steam", any(g["name"] != MINECRAFT for g in recent)),
-                                             ("minecraft", any(g["name"] == MINECRAFT for g in recent)))
-                       if seen],
+        "counted_in": [src for src in ("steam", "hoyoverse", "ombri", "minecraft")
+                       if any(src in g["sources"] for g in recent)],
         "last_game": last["name"],
         "stale": [{"game": g["name"], "since": time.strftime("%Y-%m", time.localtime(g["last"]))} for g in stale],
     }
@@ -227,8 +359,9 @@ def summarize(games: list[dict], minecraft: dict, now: float) -> dict | None:
 
 def read_now() -> dict | None:
     games = named_games(steam_rows(steam_dir()))
+    local_low = Path(os.environ.get("USERPROFILE") or Path.home()) / "AppData" / "LocalLow"
     folder = Path(os.environ.get("APPDATA") or Path.home()) / ".minecraft"
-    return summarize(games, minecraft_summary(folder), time.time())
+    return summarize(games + hoyoverse_games(local_low) + seen_games(), minecraft_summary(folder), time.time())
 
 
 _latest: dict | None = None

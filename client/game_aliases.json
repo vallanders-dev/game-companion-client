@@ -48,5 +48,25 @@
     "canonical_game": "Naruto Shippuden: Ultimate Ninja Storm 4",
     "process_names": ["NSUNS4.exe"],
     "window_title_substrings": ["Ultimate Ninja STORM 4", "NSUNS4"]
+  },
+  {
+    "canonical_game": "Genshin Impact",
+    "process_names": ["GenshinImpact.exe", "YuanShen.exe"],
+    "window_title_substrings": []
+  },
+  {
+    "canonical_game": "Honkai: Star Rail",
+    "process_names": ["StarRail.exe"],
+    "window_title_substrings": []
+  },
+  {
+    "canonical_game": "Zenless Zone Zero",
+    "process_names": ["ZenlessZoneZero.exe"],
+    "window_title_substrings": []
+  },
+  {
+    "canonical_game": "Honkai Impact 3rd",
+    "process_names": ["BH3.exe"],
+    "window_title_substrings": []
   }
 ]

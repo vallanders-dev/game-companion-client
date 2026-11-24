@@ -32,8 +32,8 @@ class HudClient:
     def __init__(self, enabled: bool, log_path: Path | None = None, on_command=None,
                  start_in_tray: bool = False) -> None:
         """`on_command(name)` is called, on a reader thread, for each command
-        the UI sends back ("quit", "pause", "resume", "settings",
-        "relaunch_admin", "notes_list", "notes_delete:<id>"). `start_in_tray`:
+        the UI sends back ("quit", "pause", "resume", "relaunch_admin",
+        "notes_list", "notes_delete:<id>", ...). `start_in_tray`:
         don't open the main window at start (a relaunch while the game is in
         front)."""
         self.enabled = False
@@ -193,3 +193,43 @@ class HudClient:
         the tester's notes, newest first ({id, game, note, created, source}),
         or an error line to show instead."""
         self._send({"type": "notes", "items": list(items), "error": error})
+
+    # -- the Chat view (docs/agentic_chat.md, phase 1, 2026-11-21) -----------
+    # Memory only on the UI side: the window shows this run's turns and
+    # writes nothing. The texts are what the server already sends per turn.
+    def chat_question(self, text: str, game: str | None = None) -> None:
+        """The turn's question (turn_meta), opening a new turn in the chat."""
+        if text:
+            self._send({"type": "chat_question", "text": text, "game": game})
+
+    def chat_answer(self, text: str) -> None:
+        """A piece of the answer (turn_text), appended to the newest turn."""
+        if text:
+            self._send({"type": "chat_answer", "text": text})
+
+    # -- the Build pane (server/build_guide.py, 2026-11-22) ------------------
+    def guide(self, body: dict) -> None:
+        """The server's `guide` message (or the same shape built from a REST
+        click-open): action "open" | "layer" | "close" | "list" with the
+        pane's next state. The pane keeps the state in memory; the window
+        answers with "guide_state:<id>:<layer>" (or ":list") so the next
+        turn_start carries it."""
+        if isinstance(body, dict) and body.get("action"):
+            self._send({"type": "guide", **{k: v for k, v in body.items() if k != "type"}})
+
+    def chat_cards(self, cards: list[dict]) -> None:
+        """Cards under the newest answer: [{kind, url, title, site, thumb}]."""
+        self._send({"type": "chat_cards", "cards": [c for c in cards if isinstance(c, dict)]})
+
+    # -- the chat redesign (docs/chat_redesign.md, 2026-11-23) ---------------
+    def chat_stage(self, stage: str) -> None:
+        """A stage only the client knows ("screen": a screenshot went with the turn)."""
+        self._send({"type": "chat_stage", "stage": stage})
+
+    def chat_done(self, outcome: str) -> None:
+        """The turn ended; "failed" when the connection dropped."""
+        self._send({"type": "chat_done", "outcome": outcome})
+
+    def chat_confirm(self, text: str) -> None:
+        """A typed note: the chat shows "Sim, guardar" / "Não" under it."""
+        self._send({"type": "chat_confirm", "text": text})

@@ -9,6 +9,13 @@ The token is checked against the real server before it's saved, so a typo
 or a revoked token is caught here, with a plain explanation, not later as a
 cryptic connection error.
 
+Since 2026-11-21 the main window has the same fields as a panel
+(client/gui/settings_panel.py, the "Configurações" view), so the window's
+own buttons and the tray no longer start this process; `--reason settings`
+stays for the shortcut and `python -m client.main --settings`. Both the
+panel and this dialog save through client/gui/settings_save.submit(): one
+save path, one file written the same way.
+
 Language and voice (2026-09-27): the language list picks Portuguese,
 English or Spanish (2026-11-03) - the whole conversation: speech
 recognition, answers, spoken lines, console text; the voice list shows that language's voices
@@ -23,7 +30,6 @@ Exit code 1: the player closed the window without saving.
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 import threading
 
@@ -36,11 +42,10 @@ from PySide6.QtWidgets import (
 from client import capture, voices
 from client.config import (
     USER_SETTINGS_PATH, load_client_settings, load_duck_settings, load_follow_up_seconds, load_saved_token, load_voice_commands, load_show_in_recordings,
-    save_user_settings,
 )
 from client.gui.fonts import body_font, ensure_fonts_loaded, heading_font
+from client.gui.settings_save import clean_token, submit  # noqa: F401 - clean_token re-exported (it lived here)
 from client.gui.theme import DARK_THEME as T
-from client.net import AuthError, ServerError, ServerSession
 
 REASONS = ("missing", "rejected", "settings")
 
@@ -53,6 +58,7 @@ UI = {
         "language": "Idioma",
         "voice": "Voz",
         "listen": "Ouvir",
+        "voice_saved": "Voz salva: {name}.",
         "token": "Token",
         "token_placeholder": "seu token de testador",
         "token_keep": "(token salvo - deixe em branco pra manter)",
@@ -76,7 +82,7 @@ UI = {
         "rec": "Gravações",
         "rec_on": "Aparecer nas gravações e lives (OBS, Discord)",
         "history": "Relatório",
-        "history_on": "Usar o que joguei na Steam e no Minecraft no \"Ombri, acorda!\"",
+        "history_on": "Usar o que joguei na Steam, no HoYoPlay, no Minecraft e com o Ombri aberto no \"Ombri, acorda!\"",
         "follow": "Conversa",
         "follow_on": "Continuar ouvindo depois que eu respondo",
         "vcmd": "Comandos de voz",
@@ -90,6 +96,7 @@ UI = {
         "language": "Language",
         "voice": "Voice",
         "listen": "Listen",
+        "voice_saved": "Voice saved: {name}.",
         "token": "Token",
         "token_placeholder": "your tester token",
         "token_keep": "(token saved - leave empty to keep it)",
@@ -113,7 +120,7 @@ UI = {
         "rec": "Recordings",
         "rec_on": "Show me in recordings and streams (OBS, Discord)",
         "history": "Report",
-        "history_on": "Use what I play on Steam and in Minecraft in \"Ombri, wake up!\"",
+        "history_on": "Use what I play on Steam, HoYoPlay, Minecraft and with Ombri open in \"Ombri, wake up!\"",
         "follow": "Conversation",
         "follow_on": "Keep listening after I answer",
         "vcmd": "Voice commands",
@@ -128,6 +135,7 @@ UI = {
         "language": "Idioma",
         "voice": "Voz",
         "listen": "Escuchar",
+        "voice_saved": "Voz guardada: {name}.",
         "token": "Token",
         "token_placeholder": "tu token de tester",
         "token_keep": "(token guardado - déjalo en blanco para mantenerlo)",
@@ -151,7 +159,7 @@ UI = {
         "rec": "Grabaciones",
         "rec_on": "Aparecer en grabaciones y transmisiones (OBS, Discord)",
         "history": "Informe",
-        "history_on": "Usar lo que juego en Steam y Minecraft en \"Ombri, despierta\"",
+        "history_on": "Usar lo que juego en Steam, HoYoPlay, Minecraft y con Ombri abierto en \"Ombri, despierta\"",
         "follow": "Conversación",
         "follow_on": "Seguir escuchando después de responder",
         "vcmd": "Comandos de voz",
@@ -189,14 +197,6 @@ QLabel:disabled {{ color: {T.text_muted}; }}
 """
 
 
-def clean_token(raw: str) -> str:
-    """Accepts the token alone or the whole `SERVER_AUTH_TOKEN=...` line from
-    the invite message, and drops spaces/line breaks picked up by the paste."""
-    text = raw.strip()
-    text = re.sub(r"^\s*SERVER_AUTH_TOKEN\s*=\s*", "", text)
-    return re.sub(r"\s+", "", text)
-
-
 # Windows primary language ids -> Ombri's language (anything else: English).
 _WINDOWS_LANGUAGES = {0x16: "pt", 0x0A: "es"}  # LANG_PORTUGUESE, LANG_SPANISH
 
@@ -226,8 +226,7 @@ class TokenDialog(QDialog):
         self.setMinimumWidth(500)
         self.setStyleSheet(STYLE)
         self._result: tuple[str, str] | None = None
-        self._worker: threading.Thread | None = None
-        self._pending_token = ""
+        self._worker: threading.Thread | None = None  # not None while a save is in flight
 
         if USER_SETTINGS_PATH.exists() or self.reason != "missing":
             start_voice = voices.get(load_client_settings().voice)
@@ -442,9 +441,9 @@ class TokenDialog(QDialog):
 
         def play() -> None:
             try:
-                from client.fixed_audio import play_line
+                from client.fixed_audio import play_preview
 
-                play_line("sample", voice, fallback_tone=False)
+                play_preview("sample", voice)
             except Exception:  # noqa: BLE001 - no audio device: nothing to hear, nothing to break
                 pass
 
@@ -456,38 +455,27 @@ class TokenDialog(QDialog):
         self.status.setStyleSheet(f"color: {color};")
 
     def _submit(self) -> None:
+        """The save itself is client/gui/settings_save.submit(), shared with the
+        settings panel in the main window (2026-11-21): this method only moves
+        the widgets. A token check runs on submit()'s worker thread; its
+        answer lands in `_result` and `_poll` picks it up on the GUI thread."""
         if self._worker is not None:
             return
-        token = clean_token(self.field.text())
-        if not token and self.reason == "settings" and self.saved_token:
-            # Only language/voice changed: nothing to check with the server.
-            save_user_settings(voice=self.selected_voice(), **self._duck_fields())
+        out = submit(self.field.text(), voice=self.selected_voice(), fields=self._duck_fields(),
+                     keep_saved=self.reason == "settings" and bool(self.saved_token),
+                     server_url=self.server_url, done=lambda kind, name: setattr(self, "_result", (kind, name)))
+        if out.status == "saved":
             self._set_status(self._s("saved"), T.states.listening)
             QTimer.singleShot(900, self.accept)
             return
-        if not token:
+        if out.status == "need_token":
             self._set_status(self._s("need_token"), T.states.thinking)
             return
-        self.field.setText(token)
+        self._worker = out.worker
+        self.field.setText(clean_token(self.field.text()))
         self.ok_btn.setEnabled(False)
         self.field.setEnabled(False)
         self._set_status(self._s("checking"), T.text_secondary)
-
-        def check() -> None:
-            session = ServerSession(self.server_url, token)
-            try:
-                name = session.connect(timeout=15)
-                self._result = ("ok", name)
-            except AuthError:
-                self._result = ("rejected", "")
-            except ServerError:
-                self._result = ("unreachable", "")
-            finally:
-                session.close()
-
-        self._pending_token = token
-        self._worker = threading.Thread(target=check, daemon=True)
-        self._worker.start()
         self._poll.start()
 
     def _check_result(self) -> None:
@@ -497,8 +485,7 @@ class TokenDialog(QDialog):
         kind, name = self._result
         self._result = None
         self._worker = None
-        if kind == "ok":
-            save_user_settings(token=self._pending_token, voice=self.selected_voice(), **self._duck_fields())
+        if kind == "ok":  # already written by submit()'s worker, token included
             self._set_status(self._s("connected", name=name), T.states.listening)
             QTimer.singleShot(900, self.accept)
             return

@@ -34,6 +34,10 @@ overlay (HUD)" section: the full text view is a real, working capability
 that might come back in a future version - it's defaulted away here, not
 designed out of the architecture.
 
+2026-11-23 (Tony): the usage pill is gone too - its text was always
+Portuguese - and so is the grey rounded box Windows 11 drew around the
+window. In game only the orb remains.
+
 Window behavior, in one place since it's easy to lose track of which flag
 does what:
 - Frameless / translucent / always-on-top / no taskbar entry:
@@ -87,7 +91,7 @@ import sys
 from enum import Enum
 
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QRect, QRectF, QTimer, Qt
-from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath
+from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import QApplication, QWidget
 
 from client.gui.global_keys import AsyncKeyPoller
@@ -109,22 +113,6 @@ class HudState(Enum):
 # Layout / sizing
 # --------------------------------------------------------------------- #
 ORB_OUTER_DIAMETER = 88
-
-# Usage readout (2026-09-25): a beta tester's own remaining-calls-today
-# count, painted as a small pill below the orb - not a return of the
-# question/answer info panel (still deleted, see the module docstring),
-# just this one number a tester genuinely needs to self-monitor with.
-# Widens/heightens the fixed window (still never resizes at runtime) to
-# make room; drawn directly in paintEvent(), no child widget, same as the
-# orb itself. Window width is computed from REAL font metrics against
-# USAGE_WIDTH_SAMPLE at construction time, not a guessed pixel constant -
-# a fixed guess (60px extra) measured 40px too narrow the first time this
-# was tried, clipping the pill to the window's edge.
-USAGE_ROW_HEIGHT = 20
-USAGE_ROW_GAP = 6
-USAGE_FONT_POINT_SIZE = 8.5
-USAGE_PILL_PADDING = 20
-USAGE_WIDTH_SAMPLE = "9999 restantes hoje"  # a safely-wide sample - real caps are 3 digits at most today
 
 CORNER = "top-right"          # "top-right" | "top-left" | "bottom-right" | "bottom-left"
 CORNER_SCREEN_MARGIN = 24
@@ -149,6 +137,27 @@ HOTKEY_POLL_MS = 50
 # topmost slot on a timer (no activation, no focus change) puts us back on
 # top. Cannot help against true exclusive-display fullscreen.
 TOPMOST_REASSERT_MS = 1000
+
+
+def capture_allowed_to_see_orb(setting=None, anticheat_in_front=None) -> bool:
+    """WDA_NONE (True) or WDA_EXCLUDEFROMCAPTURE (False) for the orb: the
+    "show Ombri in recordings" setting, except that an anti-cheat game in
+    front always gets True. Arguments are for tests; None reads the real
+    setting / foreground window. Any failure means True (shown)."""
+    try:
+        if anticheat_in_front is None:
+            from client.anticheat_games import anticheat_game_in_front
+
+            anticheat_in_front = anticheat_game_in_front()
+        if anticheat_in_front:
+            return True
+        if setting is None:
+            from client.config import load_show_in_recordings
+
+            setting = load_show_in_recordings()
+        return bool(setting)
+    except Exception:  # noqa: BLE001
+        return True
 
 # The orb is the approved mockup's sphere since 2026-09-29 (client/gui/orb.py,
 # shared with the main window): it breathes at rest and pulses while
@@ -256,7 +265,6 @@ class OverlayWindow(QWidget):
         self._drag_offset = None
         self._presence_tier = "ativo"  # "ativo" | "repouso" | "ausente"
         self._anim_phase = 0.0  # seconds, free-running - drives the orb's breathing/pulse/swirl (2026-09-25)
-        self._usage_text: str | None = None  # None until set_usage() is first called - nothing painted until then
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -268,15 +276,10 @@ class OverlayWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
-        usage_font = self.font()
-        usage_font.setPointSizeF(USAGE_FONT_POINT_SIZE)
-        sample_w = QFontMetrics(usage_font).horizontalAdvance(USAGE_WIDTH_SAMPLE) + USAGE_PILL_PADDING
-
+        # Only the orb (Tony, 2026-11-23): the window is the orb's own footprint.
         diameter, margin = _footprint()
-        orb_footprint = diameter + 2 * margin
-        w = max(orb_footprint, sample_w)
-        h = orb_footprint + USAGE_ROW_GAP + USAGE_ROW_HEIGHT
-        self.setGeometry(self._initial_geometry(w, h))
+        orb_footprint = int(round(diameter + 2 * margin))
+        self.setGeometry(self._initial_geometry(orb_footprint, orb_footprint))
 
         self._repouso_timer = QTimer(self)
         self._repouso_timer.setSingleShot(True)
@@ -347,13 +350,9 @@ class OverlayWindow(QWidget):
         """No-op (2026-09-25) - see the module docstring."""
 
     def set_usage(self, calls_made: int, cap: int) -> None:
-        """The one piece of the old info panel that came back (2026-09-25),
-        by request - a beta tester's own remaining-calls-today count,
-        painted as a small pill below the orb. Not the question/answer
-        panel (still gone, see the module docstring) - just this number."""
-        from client.gui.ui_texts import questions  # uses -> estimated questions
-        self._usage_text = f"~{questions(cap - calls_made)} restantes hoje"
-        self.update()
+        """No-op since 2026-11-23 (Tony): the in-game count was always in
+        Portuguese and nobody noticed; in game only the orb remains. The
+        count lives in the main window (ui_texts "usage_left", translated)."""
 
     def set_click_through(self, enabled: bool) -> None:
         self._click_through = enabled
@@ -459,12 +458,10 @@ class OverlayWindow(QWidget):
         few seconds. Silent on failure, like the other ctypes calls here."""
         if sys.platform != "win32":
             return
-        try:
-            from client.config import load_show_in_recordings
-
-            show = load_show_in_recordings()
-        except Exception:  # noqa: BLE001
-            show = True
+        # While a game with an anti-cheat is in front (client/anticheat_games.py)
+        # the orb is always shown in captures, setting or not: hiding a topmost
+        # window from capture is what cheat overlays do (2026-11-20).
+        show = capture_allowed_to_see_orb()
         if show == getattr(self, "_shown_in_capture", None):
             return
         try:
@@ -505,9 +502,14 @@ class OverlayWindow(QWidget):
             hwnd = ctypes.c_void_p(int(self.winId()))
             dwmapi = ctypes.WinDLL("dwmapi")
             DWMWA_WINDOW_CORNER_PREFERENCE = 33
-            DWMWCP_ROUND = 2
-            corner = ctypes.c_int(DWMWCP_ROUND)
+            # DONOTROUND, and no border: Windows 11 drew ROUND as a grey rounded
+            # box with a shadow around the orb (Tony, 2026-11-23).
+            DWMWCP_DONOTROUND = 1
+            corner = ctypes.c_int(DWMWCP_DONOTROUND)
             dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ctypes.byref(corner), ctypes.sizeof(corner))
+            DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE = 34, 0xFFFFFFFE
+            border = ctypes.c_uint(DWMWA_COLOR_NONE)
+            dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, ctypes.byref(border), ctypes.sizeof(border))
         except (OSError, AttributeError, ValueError):
             pass
 
@@ -519,7 +521,7 @@ class OverlayWindow(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         diameter, m = _footprint()
         orb_footprint = diameter + 2 * m
-        orb_left = (self.width() - orb_footprint) / 2  # window is wider than the orb, to fit the usage pill's text
+        orb_left = (self.width() - orb_footprint) / 2
         outer = QRectF(orb_left + m, m, diameter, diameter)
         key = _hud_key(self.state)
         if indicator.custom():
@@ -530,7 +532,6 @@ class OverlayWindow(QWidget):
             ring.setAlphaF(0.45)
             indicator.draw(painter, outer.center(), diameter, key, self._anim_phase, level=beat, calm=True,
                       backing=_parse_color(self.theme.surface_fill), ring=ring if self._click_through else None)
-            self._paint_usage(painter, orb_footprint)
             painter.end()
             return
         draw_sphere(painter, outer.center(), ORB_SPHERE_RADIUS * breathing_scale(key, self._anim_phase),
@@ -539,28 +540,7 @@ class OverlayWindow(QWidget):
                     # 25%), shown only while active. Replaced the coral dashed ring (owner, 2026-11-14).
                     ring_radius=outer.width() / 2 if self._click_through else None)
 
-        self._paint_usage(painter, orb_footprint)
         painter.end()
-
-    def _paint_usage(self, painter: QPainter, orb_footprint: float) -> None:
-        """The remaining-calls-today pill, below the orb - see set_usage()."""
-        if not self._usage_text:
-            return
-        font = painter.font()
-        font.setPointSizeF(USAGE_FONT_POINT_SIZE)
-        painter.setFont(font)
-        text_w = QFontMetrics(font).horizontalAdvance(self._usage_text) + USAGE_PILL_PADDING
-        text_w = min(text_w, self.width())  # defensive - the window is sized for USAGE_WIDTH_SAMPLE, not unbounded text
-        pill = QRectF((self.width() - text_w) / 2, orb_footprint + USAGE_ROW_GAP, text_w, USAGE_ROW_HEIGHT)
-
-        path = QPainterPath()
-        path.addRoundedRect(pill, USAGE_ROW_HEIGHT / 2, USAGE_ROW_HEIGHT / 2)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(_parse_color(self.theme.surface_fill))
-        painter.drawPath(path)
-
-        painter.setPen(QColor(self.theme.text_secondary))
-        painter.drawText(pill, Qt.AlignmentFlag.AlignCenter, self._usage_text)
 
     # ------------------------------------------------------------------ #
     # Mouse: left-drag to move. Nothing else (2026-09-29: right-click used

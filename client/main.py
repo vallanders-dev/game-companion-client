@@ -57,6 +57,7 @@ from client.capture import (
     GAME_CHANGED,
     HotkeyManager,
     NoForegroundGame,
+    ScreenBlockedGame,
     capture_game_window_jpeg,
     detect_game,
     foreground_game_needs_admin,
@@ -71,19 +72,22 @@ from client import play_history, texts, voices
 from client.config import (DEFAULT_SERVER_URL, FALLBACK_SERVER_URLS, load_client_settings, load_follow_up_seconds,
                            load_saved_voice, load_voice_commands, save_token)
 from client.fixed_audio import (
-    FillerPlayer, load_fillers, load_line, mark_answer_started, play_before_answer, play_line,
+    FillerPlayer, load_fillers, load_line, mark_answer_started, play_before_answer, play_line, wait_line_allowed,
 )
-from client.fixed_lines import CLOSING_LINE, NO_NOTES_BAKED_HOTKEY, NO_NOTES_LINE, WEB_SEARCH_STILL_AFTER
+from client.fixed_lines import (CLOSING_LINE, NO_NOTES_BAKED_HOTKEY, NO_NOTES_LINE, WAIT_LINE_COOLDOWN,
+                                 WEB_SEARCH_STILL_AFTER)
 from client.texts import t
 from client.gamepad import GamepadWatcher, describe_combo
 from client.gui.client import ROOT, HudClient
 from client.listen import play_confirm_tone, play_stop_tone, preload_vad_model, record_until_silence
 from client.net import AuthError, LiveTranscript, ServerError, ServerSession
 from client.recap_trigger import RecapTrigger
+from client.chat_inbox import ChatInbox
+from client import fixed_audio, own_voice
 from client.speech import AudioOut
 from client.launcher import install_launcher, relaunch_as_ombri, windowed_python
 from client.updater import check_for_update
-from client.voice_commands import VoiceListener, listener_language
+from client.voice_commands import VoiceListener, guide_word, listener_language
 
 _VERBOSE = True
 # The picked voice (client/voices.py key): which baked lines play, and - via
@@ -93,8 +97,16 @@ _voice = voices.DEFAULT_VOICE
 # The desktop UI (orb, main window, tray). A disabled HudClient until
 # cmd_ask() starts the real one - every method is a safe no-op either way.
 _UI = HudClient(False)
+# The player's own key failed: a notice with "Abrir configurações", and its card says why.
+own_voice.on_failed = lambda category, code, detail: _UI.notice("own_key", category=category, code=code,
+                                                                 detail=detail)
+fixed_audio.LINE_OVERRIDE = own_voice.cached_line  # the fixed lines in the player's own voice, once made
 # Set from the tray's "Pausar o Ombri": triggers are ignored until resumed.
 _PAUSED = threading.Event()
+# What the PC chat sends (typed questions, typed notes, the mic button, the
+# note's yes/no buttons): docs/chat_redesign.md, 2026-11-23.
+_CHAT = ChatInbox()
+_CHAT.on_dropped = lambda: _UI.chat_done("failed")
 # A --relaunched copy (admin relaunch, update restart) starts in the tray: the
 # game is usually in front, and opening the main window took its focus.
 _RELAUNCHED = False
@@ -106,12 +118,22 @@ _GAME_PICKED = threading.Event()
 GAME_NAME_MAX = 80
 # "Ei, Ombri" / "chega" (client/voice_commands.py): None unless the setting is on.
 _VOICE: "VoiceListener | None" = None
+# The Build pane's state (client/gui/build_pane.py; server/build_guide.py,
+# 2026-11-22), mirrored from the UI's "guide_state:<id>:<layer>[:list]"
+# commands and from every `guide` message: what the next turn_start.guide says.
+# The pane is the keeper; this is a copy, nothing is written anywhere.
+_GUIDE: dict = {"id": None, "layer": 0, "list": False}
 
 
 def _set_voice(key: str) -> None:
     global _voice
     _voice = voices.get(key).key
     texts.set_language(voices.get(_voice).language)
+    # The mic's start cue is this voice saying "Yes?" (the beep if not baked).
+    from client.listen import set_start_cue
+    from client.speech import TTS_PCM_RATE
+
+    set_start_cue(load_line("ack", _voice), TTS_PCM_RATE)
 
 
 def telemetry(line: str) -> None:
@@ -240,16 +262,26 @@ def _sync_voice_listener(triggers: list) -> None:
     language = voices.get(_voice).language
     if _VOICE is not None and (not wanted or _VOICE.language != listener_language(language)):
         _VOICE.stop()
-        for trigger in (_VOICE.wake, _VOICE.shush):
+        for trigger in (_VOICE.wake, _VOICE.shush, _VOICE.guide):
             if trigger in triggers:
                 triggers.remove(trigger)
         _VOICE = None
         telemetry("  (comandos de voz desligados)")
     if wanted and _VOICE is None:
         _VOICE = VoiceListener(language)
+        _VOICE.set_guide(bool(_GUIDE["id"]))  # a build already open: its words from the start
         _VOICE.start()
-        triggers.extend([_VOICE.wake, _VOICE.shush])
+        triggers.extend([_VOICE.wake, _VOICE.shush, _VOICE.guide])
         telemetry("  (comandos de voz ligados - modelo carregando)")
+
+
+def _sync_guide_words() -> None:
+    """The listener hears the pane's words ("próxima" / "volta" / "repete",
+    client/voice_commands.py GUIDE_PHRASES) only while a build is open: told
+    on every change of the `_GUIDE` mirror. Nothing when the setting is off."""
+    voice = _VOICE
+    if voice is not None:
+        voice.set_guide(bool(_GUIDE["id"]))
 
 
 def _known_game_names(settings) -> list[str]:
@@ -473,6 +505,9 @@ def _capture_for_turn(settings) -> tuple[bytes | None, str]:
     picture, said out loud. Honest degradation, CLAUDE.md Principle 2."""
     try:
         return capture_game_window_jpeg(settings.game_aliases_path), ""
+    except ScreenBlockedGame as exc:
+        telemetry(f"  (sem captura: {exc})")  # by rule, not a failure: not logged as one
+        return None, "jogo_competitivo"
     except NoForegroundGame as exc:
         print(t("capture_failed"))
         telemetry(f"  (captura falhou: {exc})")
@@ -485,6 +520,40 @@ def _capture_for_turn(settings) -> tuple[bytes | None, str]:
         return None, "falha_na_captura"
 
 
+def _typed_note(session: ServerSession, game: str, text: str) -> None:
+    """A note typed in the chat (the "Lembrar" chip): the same remember turn as
+    F6 with the text instead of a recording, no screenshot, nothing spoken; the
+    server's "save it?" shows as buttons under the note and only a clear "Sim"
+    saves (Principle 3). Needs "text_only" on the server; an older one gets
+    nothing sent (the chat says it failed)."""
+    if not session.supports("text_only"):
+        _UI.chat_done("failed")
+        return
+    turn_id = uuid.uuid4().hex
+    cancel = threading.Event()
+    language = voices.get(_voice).language
+
+    def record_reply() -> str | None:
+        _UI.chat_confirm(text)
+        return _CHAT.wait_confirm(language, cancel)
+
+    try:
+        result = session.remember(turn_id, game, None, record_reply=record_reply, cancel=cancel,
+                                  on_usage=_UI.usage, note_text=text)
+    except ServerError as exc:
+        print(t("error", error=exc))
+        _UI.connection("offline")
+        _UI.chat_done("failed")
+        return
+    _UI.connection("ok")
+    outcome = str(result.get("outcome") or "failed")
+    _UI.chat_done(outcome)
+    if outcome == "note_saved":
+        print(t("note_saved", text=result.get("answer_text", "")))
+    elif outcome == "note_discarded":
+        print(t("note_discarded", reason=result.get("stats", {}).get("reason", "")))
+
+
 def _remember_note(session: ServerSession, settings, game: str, barge: "BargeInWatcher | None"):
     """The F6 flow - see `client.net.ServerSession.remember()`'s docstring
     for the `on_state("ouvindo")` -> record -> `turn_continue` protocol.
@@ -495,10 +564,17 @@ def _remember_note(session: ServerSession, settings, game: str, barge: "BargeInW
 
     print(t("speak_note", hang=settings.mic_silence_hang))
     _UI.state("ouvindo")
-    live = _live(session, settings)
+    # the player's own key: the note never reaches our STT (a server that takes the note as words)
+    own_ears = own_voice.settings_for("ears") if session.supports("text_only") else None
+    live = None if own_ears else _live(session, settings)
     wav = _record(settings, live)
     live_id = _live_result(live, wav)
     _UI.state("pensando")
+    note_text = None
+    if wav and own_ears:
+        note_text = own_voice.own_transcribe(own_ears, wav, voices.get(_voice).language)
+        if note_text == "":
+            wav = None  # nothing said
     if not wav:
         _UI.state("idle")
         print(t("note_not_heard_retry"))
@@ -513,7 +589,13 @@ def _remember_note(session: ServerSession, settings, game: str, barge: "BargeInW
     except Exception as exc:  # noqa: BLE001
         print(t("no_audio_out", error=exc))
 
+    # The player's own voice reads the "save it?" (the server sends it as text).
+    own = own_voice.settings_for("voice") if session.supports("text_only") else None
+    speaker = own_voice.OwnSpeaker(own, audio_out, cancel) if own else None
+
     def record_reply() -> bytes | None:
+        if speaker is not None:
+            speaker.wait_spoken()  # the mic opens after the question, not over it
         print(t("answer_yes_no"))
         _UI.state("ouvindo")
         reply = _record(settings)
@@ -524,18 +606,29 @@ def _remember_note(session: ServerSession, settings, game: str, barge: "BargeInW
         _UI.state("falando")
         audio_out.write(pcm, cancel)
 
+    def on_text(text: str) -> None:
+        if speaker is not None:
+            _UI.state("falando")
+            speaker.say(text)
+
     try:
         result = session.remember(
-            turn_id, game, None if live_id else wav, screenshot_bytes=screenshot, record_reply=record_reply,
-            live_id=live_id,
+            turn_id, game, None if live_id or note_text else wav, screenshot_bytes=screenshot,
+            record_reply=record_reply, live_id=live_id,
             cancel=cancel, on_audio=on_audio, on_usage=_UI.usage,
+            note_text=note_text or None, text_only=speaker is not None, on_text=on_text,
         )
     except ServerError as exc:
         print(t("error", error=exc))
         _UI.state("idle")
         _UI.connection("offline")
+        if speaker is not None:
+            cancel.set()
+            speaker.finish(timeout=2)
         audio_out.close()
         return
+    if speaker is not None:
+        speaker.finish()
     audio_out.close(drain=True)
     _UI.state("idle")
     _UI.connection("ok")
@@ -640,6 +733,104 @@ def _offer_recap(session: ServerSession, settings, game: str, barge: "BargeInWat
     return None
 
 
+def _guide_field() -> dict:
+    """`turn_start.guide` for session.ask(): {} while the pane is closed (so
+    "quero construir uma casa" can start it), {"list": True} while it lists
+    the builds, {id, layer} with a build open. net.py sends it only when the
+    server advertises "build_guide"."""
+    if _GUIDE["id"]:
+        return {"id": _GUIDE["id"], "layer": _GUIDE["layer"]}
+    if _GUIDE["list"]:
+        return {"list": True}
+    return {}
+
+
+def _apply_guide_message(body: dict) -> None:
+    """A `guide` message - the server's (inside an ask turn) or one built here
+    from a REST click-open: the pane gets it, and the mirror follows at once,
+    so a second command before the pane answers back still carries the right
+    layer."""
+    action = body.get("action")
+    if action in ("open", "layer"):
+        try:
+            layer = int(body.get("layer") or 1)
+        except (TypeError, ValueError):
+            layer = 1
+        _GUIDE.update(id=str(body.get("id") or "") or None, layer=layer, list=False)
+    elif action == "close":
+        _GUIDE.update(id=None, layer=0, list=False)
+    elif action == "list":
+        _GUIDE.update(id=None, layer=0, list=True)
+    if action in ("open", "layer", "close", "list"):
+        telemetry(f"  [guia] {action} · {body.get('id') or '-'} · camada {body.get('layer') or '-'}")
+        _sync_guide_words()
+    elif action == "step":
+        # A word heard on the PC: the pane moves itself (as its keys do) and
+        # answers with "guide_state:", which brings the mirror up to date.
+        telemetry(f"  [guia] step {int(body.get('delta') or 0):+d} · {_GUIDE['id'] or '-'} · camada {_GUIDE['layer'] or '-'}")
+    _UI.guide(body)
+
+
+def _guide_by_voice(command: str | None) -> str | None:
+    """A guide word heard on this PC (client/voice_commands.py `guide`:
+    listening mode on, a build open, the word said alone). "next" / "back"
+    move the pane here and now - no recording, no turn, no sound: the pane
+    steps as its own keys do (next on the last layer finishes the build) and
+    ripples as for a spoken command. "repeat" is the one word whose whole
+    point is hearing the line again, so it comes back as the typed question
+    the main loop sends: the server's matcher answers with this layer's
+    fixed line (no STT, no Kimi, not counted as a use). None = handled, or
+    nothing to do (the pane closed meanwhile)."""
+    if command not in ("next", "back", "repeat") or not _GUIDE["id"]:
+        return None
+    word = guide_word(voices.get(_voice).language, command)
+    print(t("guide_word_heard", word=word))
+    if command == "repeat":
+        return word
+    _apply_guide_message({"action": "step", "delta": 1 if command == "next" else -1, "command": command})
+    return None
+
+
+def _guide_command(cmd: str) -> None:
+    """The Build pane's own commands. "guide_state:<id>:<layer>[:list]" is
+    where the pane is now (a click or a key moved it: no turn, nothing to
+    fetch). "guide_list:<game>" (the "Construir" button) and
+    "guide_open:<id>" (a build clicked in the list) read the server's REST
+    (`GET /v1/build_guides[/{id}]`) on their own thread and come back as a
+    `guide` message of the same shape the server sends by voice."""
+    if cmd.startswith("guide_state:"):
+        parts = cmd.split(":")
+        try:
+            layer = int(parts[2]) if len(parts) > 2 and parts[2] else 0
+        except ValueError:
+            layer = 0
+        gid = parts[1][:64] if len(parts) > 1 else ""
+        _GUIDE.update(id=gid or None, layer=layer, list=len(parts) > 3 and parts[3] == "list")
+        _sync_guide_words()
+        return
+    session = _SESSION
+    language = voices.get(_voice).language
+
+    def work() -> None:
+        try:
+            if cmd.startswith("guide_list:"):
+                game = " ".join(cmd.removeprefix("guide_list:").split())[:GAME_NAME_MAX]
+                builds = session.list_build_guides(game, language) if session is not None else []
+                _apply_guide_message({"action": "list", "command": "click", "builds": builds, "game": game})
+            elif cmd.startswith("guide_open:"):
+                if session is None:
+                    raise ServerError("offline")
+                data = session.get_build_guide(cmd.removeprefix("guide_open:")[:64], language)
+                body = {k: data[k] for k in ("id", "name", "layers", "materials", "build", "materials_by_layer", "hints")
+                        if k in data}
+                _apply_guide_message({"action": "open", "command": "click", "layer": 1, **body})
+        except ServerError as exc:
+            telemetry(f"  (guia indisponível: {exc})")
+            _UI.guide({"action": "error", "error": str(exc)})
+
+    threading.Thread(target=work, name="guide-rest", daemon=True).start()
+
+
 def _notes_command(cmd: str) -> None:
     """"Minhas notas" in the window: list, or delete one then list again.
     REST next to the WebSocket (`ServerSession.list_notes/delete_note`), on
@@ -738,7 +929,7 @@ def cmd_ask(_args: argparse.Namespace) -> int:
     manager = HotkeyManager(settings.capture_hotkey)
     remember_manager = HotkeyManager(settings.remember_hotkey)
     gamepad = GamepadWatcher(settings.gamepad_combo)
-    all_triggers = [manager, remember_manager] + ([gamepad] if gamepad.available else [])
+    all_triggers = [manager, remember_manager, _CHAT, _CHAT.mic] + ([gamepad] if gamepad.available else [])
 
     print(t("hotkey_ask", key=_fmt(manager.hotkey)))
     print(t("hotkey_note", key=_fmt(remember_manager.hotkey)))
@@ -769,6 +960,7 @@ def cmd_ask(_args: argparse.Namespace) -> int:
         return player
 
     fillers = make_fillers()
+    own_lines_sig = None  # the player's own voice lines the fillers were loaded with
 
     active_game: str | None = None
     # The player answered the game question with "none" (owner, 2026-11-03):
@@ -803,6 +995,13 @@ def cmd_ask(_args: argparse.Namespace) -> int:
             fillers = make_fillers()
             print(t("voice_changed", name=voices.get(_voice).name))
             _send_ui_info(ui_keys)
+        # The player's own voice (Avançado): its fixed lines are made between turns,
+        # and the fillers reload once they're there.
+        own_voice.prewarm(_voice)
+        lines_sig = own_voice.lines_signature(_voice)
+        if lines_sig != own_lines_sig:
+            own_lines_sig = lines_sig
+            fillers = make_fillers()
         _sync_voice_listener(all_triggers)
         if _VOICE is not None and _VOICE.error:
             telemetry(f"  (comandos de voz indisponíveis: {_VOICE.error})")
@@ -820,6 +1019,7 @@ def cmd_ask(_args: argparse.Namespace) -> int:
                 print(t("game_picked", name=picked))
                 print("-" * 48)
         detected, pick_shadow = _after_pick(detect_game(settings.game_aliases_path), pick_shadow)
+        play_history.seen(detected)  # the play report counts what Ombri sees in front, any launcher
         if detected:
             if detected != active_game:
                 _announce_game(settings, detected)
@@ -849,6 +1049,12 @@ def cmd_ask(_args: argparse.Namespace) -> int:
                     recap.seen(found, proc[1], proc[2])
             elif fired is None:
                 continue  # the settings window changed the voice, or a game was picked: applied at the top
+            elif fired is _CHAT:
+                pending_fired = fired  # typed in the chat: answered without a game (below)
+                game = ""
+            elif _VOICE is not None and fired is _VOICE.guide:
+                _guide_by_voice(_VOICE.guide.take_command())  # the pane moved (or closed); no game, no turn
+                continue
             elif _VOICE is not None and fired is _VOICE.wake and session.supports("report_without_game"):
                 report_probe = True
                 pending_fired = fired
@@ -888,6 +1094,7 @@ def cmd_ask(_args: argparse.Namespace) -> int:
             if _voice_setting_changed() or _GAME_PICKED.is_set():
                 return True
             seen_now = detect_game(settings.game_aliases_path)
+            play_history.seen(seen_now)
             if seen_now and seen_now != pick_shadow:
                 proc = capture.last_game_process()
                 if proc and proc[0] == seen_now:
@@ -910,7 +1117,8 @@ def cmd_ask(_args: argparse.Namespace) -> int:
         elif pending_fired is not None:
             scene, fired = "", pending_fired
             pending_fired = None
-            print(t("interrupted_note" if fired is remember_manager else "interrupted_ask"))
+            if fired is not _CHAT:
+                print(t("interrupted_note" if fired is remember_manager else "interrupted_ask"))
         else:
             scene, fired = prompt_scene(
                 all_triggers, scene_prompt,
@@ -918,6 +1126,25 @@ def cmd_ask(_args: argparse.Namespace) -> int:
             )
 
         probe_turn, report_probe = report_probe, False
+        if fired is _CHAT.mic:
+            fired = manager  # the chat's mic button: exactly an F8 press
+        typed_chat = False  # this question was typed in the PC chat: shown, not spoken
+        if fired is _CHAT:
+            message = _CHAT.take()
+            if message is None:
+                continue
+            if _PAUSED.is_set():
+                _UI.chat_done("cancelled")
+                continue
+            text, remember = message
+            if remember:
+                if not game:
+                    _UI.chat_done("no_game")  # a note belongs to a game
+                else:
+                    _typed_note(session, game, text)
+                print("-" * 48)
+                continue
+            scene, fired, typed_chat = text, None, True
         if fired is GAME_CHANGED:
             print("-" * 48)
             continue
@@ -926,8 +1153,17 @@ def cmd_ask(_args: argparse.Namespace) -> int:
         if fired is not None and _PAUSED.is_set():
             follow_up_wav = follow_up_live = None
             continue  # paused from the tray: the key does nothing
+        if _VOICE is not None and fired is _VOICE.guide:
+            # "próxima" / "volta" / "repete" said alone with a build open
+            # (listening mode on): next / back move the pane on the PC, no
+            # turn; "repete" goes on below as a typed question, so Ombri says
+            # this layer again (the server's fixed line, no recording).
+            typed = _guide_by_voice(_VOICE.guide.take_command())
+            if typed is None:
+                continue
+            scene, fired = typed, None
 
-        if fired is None and scene.strip().lower() == "jogo":
+        if fired is None and not typed_chat and scene.strip().lower() == "jogo":
             new_game = _prompt(t("game_prompt"))
             if not new_game:
                 print(t("bye"))
@@ -957,12 +1193,15 @@ def cmd_ask(_args: argparse.Namespace) -> int:
         from_wake = False
         heard_in_window = False  # this question came from the follow-up window, no key pressed
         question_text = None
+        spoken_text = None  # the question heard by the player's own ears (sent as text)
         screenshot = None
         no_screen_reason = ""  # why there is no picture, told to the answer
         wav = None
         if used_trigger:
             print(t("capturing"))
             screenshot, no_screen_reason = _capture_for_turn(settings)
+            if screenshot is not None:
+                _UI.chat_stage("screen")  # the chat's thinking row: "Olhando a tela"
             wake_audio = _VOICE.wake.take_audio() if _VOICE is not None and fired is _VOICE.wake else None
             from_wake = wake_audio is not None
             if fired is not None and _VOICE is not None and fired is _VOICE.wake:
@@ -977,15 +1216,28 @@ def cmd_ask(_args: argparse.Namespace) -> int:
             else:
                 print(t("speak_question", hang=settings.mic_silence_hang))
                 _UI.state("ouvindo")
-                live = _live(session, settings)
+                own_ears = own_voice.settings_for("ears")  # the player's own key: our STT never hears it
+                live = None if own_ears else _live(session, settings)
                 wav = _record(settings, live)
                 live_id = _live_result(live, wav)
                 _UI.state("pensando" if wav else "idle")
-            if not wav:
+                if wav and own_ears:
+                    heard = own_voice.own_transcribe(own_ears, wav, voices.get(_voice).language)
+                    if heard is not None:  # None: the key failed - the WAV goes to Ombri's STT
+                        spoken_text = heard
+                        wav = None
+                        if not heard:
+                            _UI.state("idle")
+                            print(t("empty_question"))
+                            print("-" * 48)
+                            continue
+            if not wav and spoken_text is None:
                 print(t("no_voice_type"))
                 question_text = _prompt(t("question_prompt"))
         else:
             question_text = scene
+        if spoken_text:
+            question_text = spoken_text
 
         if not wav and not question_text:
             print(t("empty_question"))
@@ -1002,6 +1254,11 @@ def cmd_ask(_args: argparse.Namespace) -> int:
             print(t("no_audio_out", error=exc))
         if barge is not None:
             barge.arm(cancel, audio_out)
+        # The player's own voice reads the answer (the server sends text only);
+        # never for a typed question, which is shown, not spoken.
+        own = None if typed_chat or not session.supports("text_only") else own_voice.settings_for("voice")
+        speaker = own_voice.OwnSpeaker(own, audio_out, cancel,
+                                       on_first=lambda: mark_answer_started(audio_out, cancel)) if own else None
 
         filler_timer = None
         search_timers: list = []
@@ -1015,7 +1272,10 @@ def cmd_ask(_args: argparse.Namespace) -> int:
             # "pensando" arrives after server-side STT + vision, right before
             # retrieval/Kimi - the same point the original app armed its
             # filler (the Kimi call), so FILLER_DELAY_MS means the same thing.
-            if state == "pensando" and fillers is not None and filler_timer is None:
+            if typed_chat:
+                return  # answered in text: no filler, no "searching" line
+            if (state == "pensando" and fillers is not None and filler_timer is None
+                    and wait_line_allowed(WAIT_LINE_COOLDOWN)):
                 filler_timer = fillers.arm(audio_out, cancel)
             # "pesquisando": no notes, the server is searching the web (3-10 s
             # of silence otherwise). Say so now - instead of a filler not yet
@@ -1024,15 +1284,32 @@ def cmd_ask(_args: argparse.Namespace) -> int:
             elif state == "pesquisando" and not search_timers:
                 if filler_timer is not None:
                     filler_timer.cancel()
-                for name, delay in (("web_search", 0.0), ("web_search_still", WEB_SEARCH_STILL_AFTER)):
+                lines = (("web_search", 0.0),) if wait_line_allowed(WAIT_LINE_COOLDOWN) else ()
+                for name, delay in (*lines, ("web_search_still", WEB_SEARCH_STILL_AFTER)):
                     pcm = load_line(name, _voice)
                     if pcm is not None:
                         search_timers.append(play_before_answer(audio_out, cancel, pcm, delay))
+
+        answer_shown = False  # a turn_text piece reached the Chat view
+        turn_cards: list = []  # links under the answer (turn_cards), shown after the answer text
 
         def on_meta(question: str, scene_text: str) -> None:
             print(t("you_asked", question=question))
             if scene_text:
                 print(t("scene_detected", scene=scene_text))
+            _UI.chat_question(question, game)  # the window's Chat view (memory only there)
+
+        def on_text(piece: str) -> None:
+            nonlocal answer_shown, t_first_heard
+            answer_shown = True
+            _UI.chat_answer(piece)
+            if speaker is not None:
+                if t_first_heard is None:
+                    t_first_heard = time.perf_counter()
+                speaker.say(piece)
+
+        def on_cards(cards: list) -> None:
+            turn_cards[:] = cards
 
         def on_audio(pcm: bytes, _turn_seq: int) -> None:
             nonlocal answer_audio_started, t_first_heard
@@ -1043,9 +1320,12 @@ def cmd_ask(_args: argparse.Namespace) -> int:
                     return
             audio_out.write(pcm, cancel)
 
-        def record_reply() -> bytes | None:
+        def record_reply() -> bytes | str | None:
             # F8 pressed for a note ("anota que...", "remind me that..."): the
             # server asks "save it?" inside this turn - record the yes/no.
+            if typed_chat:  # typed: the chat's buttons answer
+                _UI.chat_confirm(question_text or "")
+                return _CHAT.wait_confirm(voices.get(_voice).language, cancel)
             print(t("answer_yes_no"))
             _UI.state("ouvindo")
             reply = _record(settings)
@@ -1057,16 +1337,22 @@ def cmd_ask(_args: argparse.Namespace) -> int:
             result = session.ask(
                 turn_id, game, wav_bytes=None if live_id else wav, question_text=question_text,
                 screenshot_bytes=screenshot, no_screen_reason=no_screen_reason, live_id=live_id,
-                wake=from_wake, record_reply=record_reply if wav else None, follow_up=heard_in_window,
-                only_if_report=probe_turn,
+                wake=from_wake, record_reply=record_reply if wav or typed_chat or spoken_text else None,
+                follow_up=heard_in_window, only_if_report=probe_turn,
+                text_only=(typed_chat or speaker is not None) and session.supports("text_only"),
                 controls=gamepad.input_kind(from_pad=fired is gamepad) if gamepad.available else "keyboard",
-                cancel=cancel, on_state=on_state, on_meta=on_meta, on_audio=on_audio, on_usage=_UI.usage,
-                play_history=history_sent, play_history_unasked=play_history.unasked(),
+                cancel=cancel, on_state=on_state, on_meta=on_meta, on_text=on_text, on_cards=on_cards, on_audio=on_audio,
+                on_usage=_UI.usage, play_history=history_sent, play_history_unasked=play_history.unasked(),
+                guide=_guide_field(), on_guide=_apply_guide_message,
             )
         except ServerError as exc:
             print(t("error", error=exc))
             _UI.state("idle")
             _UI.connection("offline")
+            _UI.chat_done("failed")
+            if speaker is not None:
+                cancel.set()
+                speaker.finish(timeout=2)
             for timer in [filler_timer, *search_timers]:
                 if timer is not None:
                     timer.cancel()
@@ -1076,6 +1362,19 @@ def cmd_ask(_args: argparse.Namespace) -> int:
             print("-" * 48)
             continue
         play_history.after_turn(result, history_sent)
+        if not answer_shown and result.get("answer_text"):
+            # No streamed pieces (a fixed line: no notes, the closing, a cap):
+            # the Chat view still gets the text that was spoken.
+            _UI.chat_answer(str(result["answer_text"]))
+            local = ("note_saved", "note_discarded", "ignored", "cap_reached", "closing")  # played from assets
+            if settings.remember_hotkey.lower() == NO_NOTES_BAKED_HOTKEY:
+                local += ("no_notes",)
+            if speaker is not None and result.get("outcome") not in local:
+                speaker.say(str(result["answer_text"]))
+        if speaker is not None:
+            speaker.finish()  # the own voice plays to the end (or the barge-in) before the turn closes
+        if turn_cards:
+            _UI.chat_cards(turn_cards)  # the Chat view checks each one again (http/https only)
         # A turn with no answer audio (no-notes, cap) must not get a filler
         # or search line after the fact announcing an answer that isn't coming.
         for timer in [filler_timer, *search_timers]:
@@ -1105,6 +1404,7 @@ def cmd_ask(_args: argparse.Namespace) -> int:
         _UI.connection("ok")
 
         outcome = result.get("outcome")
+        _UI.chat_done(str(outcome or "failed"))
         if probe_turn:
             if outcome in ("need_game", "empty_question"):
                 ask_game_now = True
@@ -1123,7 +1423,7 @@ def cmd_ask(_args: argparse.Namespace) -> int:
             if outcome == "cap_reached":
                 print(f"  {texts.spoken('cap_reached')}")
                 pending_fired = _speak_line("cap_reached", barge)
-            elif outcome == "answered_no_audio":
+            elif outcome == "answered_no_audio" and not typed_chat:
                 print(t("no_quota_voice"))
                 pending_fired = _speak_line("cap_reached", barge)
             elif outcome == "no_notes" and settings.remember_hotkey.lower() == NO_NOTES_BAKED_HOTKEY:
@@ -1161,7 +1461,7 @@ def cmd_ask(_args: argparse.Namespace) -> int:
             print(t("voice_failed", error=tts_error))
         follow_seconds = load_follow_up_seconds()
         if (follow_seconds > 0 and pending_fired is None and outcome in FOLLOW_UP_OUTCOMES
-                and not result.get("interrupted") and not _PAUSED.is_set()):
+                and not typed_chat and not result.get("interrupted") and not _PAUSED.is_set()):
             follow_up_wav, pending_fired, follow_up_live = _listen_for_follow_up(
                 settings, all_triggers, follow_seconds, session)
             if follow_up_wav is not None:
@@ -1243,6 +1543,8 @@ def _restore_game_volume() -> None:
 def _on_ui_command(cmd: str) -> None:
     """A button in the UI process (tray menu, main window, notice). Runs on
     HudClient's reader thread."""
+    if _CHAT.command(cmd):  # the PC chat: queued for the voice loop
+        return
     if cmd == "quit":
         print(t("bye"))
         if _SESSION is not None:
@@ -1258,6 +1560,8 @@ def _on_ui_command(cmd: str) -> None:
         _UI.paused(_PAUSED.is_set())
         print(t("paused" if _PAUSED.is_set() else "resumed"))
     elif cmd == "settings":
+        # Not sent by the current UI (since 2026-11-21 the settings are a panel of
+        # the main window, client/gui/settings_panel.py); kept for an older UI build.
         subprocess.Popen([sys.executable, "-m", "client.gui.token_dialog", "--reason", "settings"], cwd=ROOT)
     elif cmd == "relaunch_admin":
         _relaunch_as_admin()
@@ -1276,6 +1580,8 @@ def _on_ui_command(cmd: str) -> None:
             _GAME_PICKED.set()
     elif cmd == "games_list":
         _games_command()
+    elif cmd.startswith(("guide_state:", "guide_list:", "guide_open:")):
+        _guide_command(cmd)  # the Build pane (client/gui/build_pane.py)
 
 
 def _after_pick(detected: str | None, pick_shadow: str | None) -> tuple[str | None, str | None]:
@@ -1529,7 +1835,9 @@ def _claim_once() -> bool:
 SETTINGS_SHORTCUT_NAME = "Parça - Configurações.lnk"  # v0.1.6-v0.1.7 only; removed by _tidy_shortcuts()
 OLD_LAUNCH_SHORTCUT_NAME = "Parça.lnk"  # before the Ombri rename; replaced by _tidy_shortcuts()
 LAUNCH_SHORTCUT_NAME = "Ombri.lnk"
-ICON_PATH = ROOT / "client" / "assets" / "parca.ico"
+# A new file name, not parca.ico: Windows caches a shortcut's icon by path, so installs that
+# had the sphere in parca.ico kept showing it in the taskbar after the update (owner, 2026-11-23).
+ICON_PATH = ROOT / "client" / "assets" / "ombri.ico"
 
 
 def _log_without_console() -> None:
@@ -1568,15 +1876,17 @@ def _tidy_shortcuts() -> None:
     covered: Parca-Setup.exe's runtime/ and instalar-parca.cmd's .venv.
     They launch pythonw.exe (no console) with the orb icon - or, once
     runtime/Ombri.exe is in place (client.launcher), that one, so Task
-    Manager says Ombri: a second pass (shortcuts_v5) repoints them. Best-effort
-    and silent; recorded in settings.json."""
+    Manager says Ombri: a second pass (shortcuts_v5) repoints them. The v6
+    pass points them at ombri.ico (the mascot's head; the cached parca.ico was
+    still the sphere) and asks Windows to redraw its icons. Best-effort and
+    silent; recorded in settings.json."""
     from client.config import _read_user_settings, save_user_settings
     from client.updater import INSTALL_MARKER, REPO_ROOT
 
     pythonw = next((p for p in (REPO_ROOT / "runtime" / "pythonw.exe",
                                 REPO_ROOT / ".venv" / "Scripts" / "pythonw.exe") if p.exists()), None)
     launcher = install_launcher() if pythonw is not None else None
-    done_key = "shortcuts_v5" if launcher else "shortcuts_v4"
+    done_key = "shortcuts_v6" if launcher else "shortcuts_v6_py"
     if not INSTALL_MARKER.exists() or pythonw is None or _read_user_settings().get(done_key):
         return
     script = (
@@ -1602,6 +1912,11 @@ def _tidy_shortcuts() -> None:
     except Exception:  # noqa: BLE001
         done = False
     if done:
+        try:  # SHCNE_ASSOCCHANGED: the taskbar and Start menu drop their cached icons
+            import ctypes
+            ctypes.windll.shell32.SHChangeNotify(0x08000000, 0, None, None)
+        except (OSError, AttributeError):
+            pass
         save_user_settings(**{done_key: True})
 
 

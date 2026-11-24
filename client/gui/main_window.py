@@ -9,160 +9,46 @@ it to the tray - Ombri keeps running.
 
 Pure view: it never talks to the voice loop itself. ui_process.py feeds it
 (set_state, set_game, ...) and relays its buttons as commands.
+
+Since 2026-11-23 (docs/chat_redesign.md) there is no top nav. The home column
+(440 px, the mascot exactly where it always was) has a coral "Conversar com o
+Ombri" button; it widens the same window to the right and the chat
+(client/gui/chat_view.py) opens beside the home column, which never moves.
+"Minhas notas" and "Configurações" open in the home column from their
+buttons, each with a "Voltar". The stack's pages: 0 waiting, 1 status,
+2 notes, 3 settings.
+
+Since 2026-11-22 (the Minecraft build guide, server/build_guide.py) the
+Ombri view also carries the Build pane (client/gui/build_pane.py): not a
+page - an overlay over the stack on which the orb morphs into the pane when
+a guide opens ("quero construir uma casa", the "Construir" button) and back
+when it closes. The pane keeps the guide's state in memory; the window
+re-emits it (`guide_state_changed`) for main.py's next turn_start.
 """
 from __future__ import annotations
 
 import time
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QCursor, QFont, QPainter, QPixmap
 from PySide6.QtWidgets import (
-    QFrame, QGridLayout, QHBoxLayout, QLabel, QProgressBar, QPushButton, QScrollArea, QStackedWidget, QVBoxLayout,
-    QWidget,
+    QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout, QLabel, QProgressBar, QPushButton, QScrollArea,
+    QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from client.gui import indicator
-from client.gui.fonts import BODY_FAMILY, HEADING_FAMILY, ensure_fonts_loaded
+from client.gui import indicator, motion
+from client.gui.build_pane import GuideMorph
+from client.gui.chat_view import CHAT_W, ChatView
+from client.gui.fonts import HEADING_FAMILY, ensure_fonts_loaded
 from client.gui.orb import HALO_STATES, breathing_scale, draw_sphere, draw_thinking_halo, sphere_image, state_color
+from client.gui.settings_panel import SettingsPanel
+from client.gui.shadow import HEAD_CY, HEAD_RX, HEAD_RY
 from client.gui.speaking import make_design
 from client.gui.ui_texts import UI, questions, ui
-
-WINDOW_W, WINDOW_H = 440, 780
-RADIUS = 12
-
-BG = "#111318"
-BAR = "#0C0E12"
-CARD = "#1A1D24"
-CONTROL = "#2A2E38"
-TEXT = "#E7E9ED"
-TEXT_2 = "#A3A8B3"
-TEXT_3 = "#8A919E"
-CHIP_TEXT = "#C9CDD4"
-ACCENT = "#FF6B4A"
-OK_GREEN = "#5B7CFF"    # connected: the palette's blue (2026-11-19, was green)
-WARN_AMBER = "#FF6B4A"  # offline: coral (was amber)
-
-QSS = f"""
-QWidget#root {{ background: {BG}; border-radius: {RADIUS}px; }}
-QWidget#titlebar {{ background: {BAR}; border-top-left-radius: {RADIUS}px; border-top-right-radius: {RADIUS}px; }}
-QLabel {{ color: {TEXT}; font-family: "{BODY_FAMILY}"; background: transparent; }}
-QFrame#card {{ background: {CARD}; border-radius: 10px; }}
-QFrame#chip {{ background: {CARD}; border-radius: 13px; }}
-QLabel#caps {{ color: {TEXT_3}; font-size: 11px; font-weight: 700; }}
-QLabel#sub {{ color: {TEXT_2}; font-size: 13px; }}
-QLabel#keycap {{ background: {CONTROL}; border-radius: 6px; border-bottom: 2px solid #0B0C10;
-                 font-family: "{HEADING_FAMILY}"; font-weight: 600; font-size: 14px; padding: 3px 10px; }}
-QPushButton#winbtn {{ background: transparent; border: none; border-radius: 6px; }}
-QPushButton#winbtn:hover {{ background: #1F232B; }}
-QPushButton#btn {{ background: {CONTROL}; color: {TEXT}; border: none; border-radius: 8px;
-                   font-family: "{BODY_FAMILY}"; font-size: 14px; font-weight: 600; padding: 0 16px; }}
-QPushButton#btn:hover {{ background: #2E3340; }}
-QPushButton#small {{ background: {CONTROL}; color: {TEXT}; border: none; border-radius: 6px;
-                     font-family: "{BODY_FAMILY}"; font-size: 13px; font-weight: 600; padding: 0 12px; }}
-QPushButton#small:hover {{ background: #2E3340; }}
-QPushButton#danger {{ background: #3A1F19; color: #FF8A6E; border: none; border-radius: 6px;
-                      font-family: "{BODY_FAMILY}"; font-size: 13px; font-weight: 600; padding: 0 12px; }}
-QPushButton#danger:hover {{ background: #4A261E; }}
-QScrollArea {{ background: transparent; border: none; }}
-QScrollArea > QWidget > QWidget {{ background: transparent; }}
-QScrollBar:vertical {{ background: transparent; width: 6px; margin: 0; }}
-QScrollBar::handle:vertical {{ background: {CONTROL}; border-radius: 3px; min-height: 24px; }}
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
-QProgressBar {{ background: {CONTROL}; border: none; border-radius: 3px; }}
-QProgressBar::chunk {{ background: {ACCENT}; border-radius: 3px; }}
-"""
-
-
-def _label(text: str = "", name: str | None = None, size: int | None = None, weight: int | None = None,
-           color: str | None = None, heading: bool = False) -> QLabel:
-    lab = QLabel(text)
-    if name:
-        lab.setObjectName(name)
-    style = []
-    if heading:
-        style.append(f'font-family: "{HEADING_FAMILY}"')
-    if size:
-        style.append(f"font-size: {size}px")
-    if weight:
-        style.append(f"font-weight: {weight}")
-    if color:
-        style.append(f"color: {color}")
-    if style:
-        lab.setStyleSheet("; ".join(style) + ";")
-    if name == "caps":
-        f = lab.font()
-        f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.9)
-        lab.setFont(f)
-    return lab
-
-
-def _card() -> QFrame:
-    frame = QFrame()
-    frame.setObjectName("card")
-    return frame
-
-
-def line_icon(kind: str, color: str = TEXT, size: int = 16) -> QIcon:
-    """Small stroke icons (title bar, tips, tray menu) - the mockup's inline
-    SVGs, redrawn with QPainter on a 16-unit grid."""
-    pm = QPixmap(size * 2, size * 2)
-    pm.setDevicePixelRatio(2)
-    pm.fill(Qt.GlobalColor.transparent)
-    p = QPainter(pm)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    p.scale(size / 16, size / 16)
-    pen = QPen(QColor(color), 1.4)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-    p.setPen(pen)
-    p.setBrush(Qt.BrushStyle.NoBrush)
-    if kind == "minus":
-        p.drawLine(QPointF(3, 8), QPointF(13, 8))
-    elif kind == "close":
-        p.drawLine(QPointF(4, 4), QPointF(12, 12))
-        p.drawLine(QPointF(12, 4), QPointF(4, 12))
-    elif kind == "window":
-        p.drawRoundedRect(QRectF(2, 3, 12, 10), 1.5, 1.5)
-        p.drawLine(QPointF(2, 6), QPointF(14, 6))
-    elif kind == "pause":
-        p.drawLine(QPointF(5.5, 3), QPointF(5.5, 13))
-        p.drawLine(QPointF(10.5, 3), QPointF(10.5, 13))
-    elif kind == "play":
-        path = QPainterPath(QPointF(5, 3))
-        path.lineTo(13, 8)
-        path.lineTo(5, 13)
-        path.closeSubpath()
-        p.drawPath(path)
-    elif kind == "gear":
-        p.drawEllipse(QPointF(8, 8), 2.2, 2.2)
-        for a, b in (((8, 1.8), (8, 3.8)), ((8, 12.2), (8, 14.2)), ((1.8, 8), (3.8, 8)), ((12.2, 8), (14.2, 8)),
-                     ((3.6, 3.6), (5, 5)), ((11, 11), (12.4, 12.4)), ((3.6, 12.4), (5, 11)), ((11, 5), (12.4, 3.6))):
-            p.drawLine(QPointF(*a), QPointF(*b))
-    elif kind == "power":
-        p.drawLine(QPointF(8, 2), QPointF(8, 8))
-        p.drawArc(QRectF(3, 3.4, 10, 10), 125 * 16, 290 * 16)
-    elif kind == "screen":
-        p.drawRoundedRect(QRectF(2, 3.2, 12, 8.8), 1.2, 1.2)
-        p.drawLine(QPointF(5.6, 14), QPointF(10.4, 14))
-    elif kind == "shield":
-        path = QPainterPath(QPointF(8, 2))
-        path.lineTo(12.8, 4)
-        path.lineTo(12.8, 7.6)
-        path.cubicTo(12.8, 10.8, 10.7, 13, 8, 14)
-        path.cubicTo(5.3, 13, 3.2, 10.8, 3.2, 7.6)
-        path.lineTo(3.2, 4)
-        path.closeSubpath()
-        p.drawPath(path)
-    elif kind == "mic":
-        p.drawRoundedRect(QRectF(5.6, 2, 4.8, 8), 2.4, 2.4)
-        p.drawArc(QRectF(3.6, 4, 8.8, 8.8), 180 * 16, 180 * 16)
-        p.drawLine(QPointF(8, 12.4), QPointF(8, 14.4))
-    elif kind == "note":  # a sheet with three lines ("Minhas notas")
-        p.drawRoundedRect(QRectF(3, 2, 10, 12), 1.5, 1.5)
-        for y in (5.5, 8, 10.5):
-            p.drawLine(QPointF(5.5, y), QPointF(10.5 if y != 10.5 else 8.5, y))
-    p.end()
-    return QIcon(pm)
+from client.gui.widgets import (  # noqa: F401 - the palette and helpers lived here until 2026-11-21; still exported
+    ACCENT, BAR, BG, CARD, CHIP_TEXT, CONTROL, OK_GREEN, QSS, RADIUS, TEXT, TEXT_2, TEXT_3, WARN_AMBER, WINDOW_H,
+    WINDOW_W, _card, _label, line_icon,
+)
 
 
 class OrbWidget(QWidget):
@@ -192,6 +78,16 @@ class OrbWidget(QWidget):
         self.state = state
         self.update()
 
+    def shape(self) -> tuple[QPointF, float, float]:
+        """Where Ombri's body is inside this widget - (centre, rx, ry) of the
+        shadow head's ellipse (or the sphere) - so the Build pane's drop can
+        start exactly there (client/gui/build_pane.py)."""
+        c = QPointF(self.width() / 2, self.height() / 2)
+        if indicator.STYLE == "shadow":
+            s = self._radius * 2 * 0.9  # draw_shadow(): s = box * 0.9, the head at (0, HEAD_CY * s)
+            return QPointF(c.x(), c.y() + HEAD_CY * s), HEAD_RX * s, HEAD_RY * s
+        return c, float(self._radius), float(self._radius)
+
     def feed_voice(self, level: float) -> None:
         if self.isVisible():
             self._speaking.feed_level(level, time.monotonic() - self._t0)
@@ -212,7 +108,13 @@ class OrbWidget(QWidget):
 
         if self._eyes:
             self._level *= 0.82  # ~10 feeds a second against ~30 frames: a short tail
-            indicator.draw(p, c, self._radius * 2, self.state, t, level=self._level)
+            # The eyes follow the cursor, anywhere on screen (owner, 2026-11-19):
+            # full turn ~250 px away, easing off closer in.
+            v = self.mapFromGlobal(QCursor.pos()) - c.toPoint()
+            dist = max(1.0, (v.x() ** 2 + v.y() ** 2) ** 0.5)
+            reach = min(1.0, dist / 250.0) / dist
+            indicator.draw(p, c, self._radius * 2, self.state, t, level=self._level,
+                           look=(v.x() * reach, v.y() * reach))
             p.end()
             return
 
@@ -347,12 +249,39 @@ class NoteCard(QFrame):
         self.delete_requested.emit(self.note_id)
 
 
+VIEWS = ("ombri", "notes", "settings")  # the home column; the chat opens beside it
+
+
+class _ChatClip(QWidget):
+    """The strip right of the home column. The chat inside keeps its full
+    width while the window widens, so nothing reflows mid-animation - the
+    strip just reveals more of it."""
+
+    def __init__(self, chat: QWidget) -> None:
+        super().__init__()
+        self.chat = chat
+        chat.setParent(self)
+        chat.setFixedWidth(CHAT_W)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        self.chat.setGeometry(0, 0, CHAT_W, self.height())
+        super().resizeEvent(event)
+
+
 class MainWindow(QWidget):
-    settings_requested = Signal()
     hidden_to_tray = Signal()
     notes_requested = Signal()  # "Minhas notas" opened or refreshed: fetch the list
     note_delete_requested = Signal(str)  # the player confirmed a delete
     game_pick_requested = Signal()  # "Trocar" on the game card: open the game picker
+    chat_send_requested = Signal(str, bool)  # a typed message (text, remember) -> main.py
+    chat_mic_requested = Signal()  # the chat's mic button: F8
+    chat_confirm_answered = Signal(bool)  # a typed note's "Sim, guardar" / "Não"
+    chat_toggled = Signal(bool)  # the chat opened / closed (ui_process loads the links on open)
+    # The Build pane (client/gui/build_pane.py): where it is now (id, layer, listing),
+    # a build clicked in its list, the "Construir" button (fetch the list).
+    guide_state_changed = Signal(str, int, bool)
+    guide_open_requested = Signal(str)
+    guide_list_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__(None, Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
@@ -371,11 +300,18 @@ class MainWindow(QWidget):
         self.game: str | None = None
         self.usage: tuple[int, int] | None = None
         self.notes_enabled = False  # the server listed "notes" (features)
-        self.showing_notes = False
+        self.guide_enabled = False  # the server listed "build_guide" (features): the "Construir" button
+        self.view = "ombri"  # one of VIEWS: what the home column shows
+        self.chat_open = False  # the chat beside the home column (remembered across hide-to-tray)
+        self._chat_w = 0  # how much of the chat is revealed, 0..CHAT_W (animated)
+        # a spring, not a curve: opening and closing carry momentum and can reverse mid-way
+        self._chat_spring = motion.Spring(self, 0.0, self._set_chat_w, *motion.SPRING_LAYOUT)
+        motion.install_ripples()  # every button: a drop's ring where it's pressed
         self.notes: list[dict] | None = None  # None = loading
         self.notes_error = ""
 
         root = QWidget(self)
+        self.root = root
         root.setObjectName("root")
         root.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         root.setGeometry(0, 0, WINDOW_W, WINDOW_H)
@@ -385,14 +321,70 @@ class MainWindow(QWidget):
         self.titlebar = TitleBar(self)
         self.titlebar.hide_requested.connect(self._hide_to_tray)
         outer.addWidget(self.titlebar)
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
+        outer.addLayout(body, 1)
+        home = QWidget()
+        home.setFixedWidth(WINDOW_W)
+        h = QVBoxLayout(home)
+        h.setContentsMargins(0, 10, 0, 0)
+        h.setSpacing(0)
         self.stack = QStackedWidget()
-        outer.addWidget(self.stack, 1)
+        h.addWidget(self.stack, 1)
+        body.addWidget(home)
         self.stack.addWidget(self._build_waiting())
         self.stack.addWidget(self._build_status())
         self.stack.addWidget(self._build_notes())
+        self.settings = SettingsPanel()
+        self.stack.addWidget(self._build_settings_page())
+        self.chat = ChatView()
+        self.chat.send_requested.connect(self.chat_send_requested.emit)
+        self.chat.mic_requested.connect(self.chat_mic_requested.emit)
+        self.settings.advanced.links_cleared.connect(lambda: self.chat.set_links([]))
+        self.chat.game_requested.connect(self.game_pick_requested.emit)
+        self.chat.confirm_answered.connect(self.chat_confirm_answered.emit)
+        self.chat.close_requested.connect(self.close_chat)
+        self.chat_clip = _ChatClip(self.chat)
+        body.addWidget(self.chat_clip, 1)
+        # The Build pane: an overlay the size of the stack, over the Ombri view only.
+        self.guide = GuideMorph(root, OrbWidget(56, 26))
+        self.guide.state_changed.connect(self.guide_state_changed.emit)
+        self.guide.open_requested.connect(self.guide_open_requested.emit)
+        self.guide.phase_changed.connect(lambda _phase: self._refresh())
+        self.stack.installEventFilter(self)  # keep the overlay on the stack's geometry
+        for orb in (self.s_orb, self.w_orb):
+            # Hidden while the glass is out (the drop IS the orb: one shape, never two),
+            # the room kept so nothing under it moves.
+            policy = orb.sizePolicy()
+            policy.setRetainSizeWhenHidden(True)
+            orb.setSizePolicy(policy)
         self._refresh()
 
+    @property
+    def showing_notes(self) -> bool:
+        return self.view == "notes"
+
     # ------------------------------------------------------------------ views
+    def _build_settings_page(self) -> QWidget:
+        """The settings panel under a "Voltar" row (no nav to leave it by)."""
+        page = QWidget()
+        col = QVBoxLayout(page)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(0)
+        row = QHBoxLayout()
+        row.setContentsMargins(20, 0, 20, 0)
+        row.addStretch(1)
+        self.set_back = QPushButton()
+        self.set_back.setObjectName("btn")
+        self.set_back.setFixedHeight(36)
+        self.set_back.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.set_back.clicked.connect(self.open_ombri)
+        row.addWidget(self.set_back)
+        col.addLayout(row)
+        col.addWidget(self.settings, 1)
+        return page
+
     def _conn_chip(self) -> tuple[QFrame, QLabel, QLabel]:
         chip = QFrame()
         chip.setObjectName("chip")
@@ -452,11 +444,19 @@ class MainWindow(QWidget):
             self.w_tips.append(text)
         col.addWidget(tips)
         col.addStretch(1)
+        self.w_chat = QPushButton()  # the chat works before a game too (it asks which one)
+        self.w_chat.setObjectName("primary")
+        self.w_chat.setFixedHeight(44)
+        self.w_chat.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.w_chat.setIcon(line_icon("chat", "#14161C"))
+        self.w_chat.clicked.connect(self.toggle_chat)
+        col.addWidget(self.w_chat, 0, Qt.AlignmentFlag.AlignHCenter)
+        col.addSpacing(8)
         self.w_settings = QPushButton()
         self.w_settings.setObjectName("btn")
         self.w_settings.setFixedHeight(44)
         self.w_settings.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.w_settings.clicked.connect(self.settings_requested.emit)
+        self.w_settings.clicked.connect(self.open_settings)
         col.addWidget(self.w_settings, 0, Qt.AlignmentFlag.AlignHCenter)
         return page
 
@@ -521,8 +521,8 @@ class MainWindow(QWidget):
         top.addStretch(1)
         top.addWidget(self.s_usage)
         u.addLayout(top)
-        self.s_bar = QProgressBar()
-        self.s_bar.setFixedHeight(6)
+        self.s_bar = motion.WaterBar(ACCENT, CONTROL)  # fills like water (2026-11-23)
+        self.s_bar.setFixedHeight(8)
         self.s_bar.setTextVisible(False)
         self.s_bar.setRange(0, 100)
         u.addWidget(self.s_bar)
@@ -532,6 +532,15 @@ class MainWindow(QWidget):
         self.s_keys.setSpacing(8)
         col.addLayout(self.s_keys)
 
+        # "Conversar com o Ombri" (docs/chat_redesign.md): the chat opens beside this column.
+        self.s_chat = QPushButton()
+        self.s_chat.setObjectName("primary")
+        self.s_chat.setFixedHeight(42)
+        self.s_chat.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.s_chat.setIcon(line_icon("chat", "#14161C"))
+        self.s_chat.clicked.connect(self.toggle_chat)
+        col.addWidget(self.s_chat)
+
         self.s_notes = QPushButton()
         self.s_notes.setObjectName("btn")
         self.s_notes.setFixedHeight(40)
@@ -539,7 +548,23 @@ class MainWindow(QWidget):
         self.s_notes.setIcon(line_icon("note", TEXT))
         self.s_notes.clicked.connect(self.open_notes)
         self.s_notes.hide()  # until the server says it has the notes endpoints
-        col.addWidget(self.s_notes)
+        # Notes and Build share one row: with the chat button, three stacked rows
+        # squeezed the mascot under its own "Pronto" (2026-11-23 screenshot).
+        extras = QHBoxLayout()
+        extras.setSpacing(8)
+        extras.addWidget(self.s_notes, 1)
+
+        # "Construir" (the build guide, 2026-11-22): the list of builds without a
+        # word said - the pane then works by clicks and keys alone.
+        self.s_build = QPushButton()
+        self.s_build.setObjectName("btn")
+        self.s_build.setFixedHeight(40)
+        self.s_build.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.s_build.setIcon(line_icon("cube", TEXT))
+        self.s_build.clicked.connect(self.guide_list_requested.emit)
+        self.s_build.hide()  # until the server says it has the build guide
+        extras.addWidget(self.s_build, 1)
+        col.addLayout(extras)
 
         voice = _card()
         v = QHBoxLayout(voice)
@@ -556,7 +581,7 @@ class MainWindow(QWidget):
         self.s_settings.setObjectName("btn")
         self.s_settings.setFixedHeight(40)
         self.s_settings.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.s_settings.clicked.connect(self.settings_requested.emit)
+        self.s_settings.clicked.connect(self.open_settings)
         v.addWidget(self.s_settings)
         col.addWidget(voice)
 
@@ -683,6 +708,8 @@ class MainWindow(QWidget):
         self.s_settings.setText(ui(L, "settings"))
         self.s_notes.setText(ui(L, "notes_button"))
         self.s_notes.setVisible(self.notes_enabled)
+        self.s_build.setText(ui(L, "guide_button"))
+        self.s_build.setVisible(self.guide_enabled)
         self.w_settings.setText(ui(L, "settings"))
         self.s_footer.setText(ui(L, "footer"))
 
@@ -693,24 +720,45 @@ class MainWindow(QWidget):
         for lab, key in zip(self.w_tips, ("tip_window", "tip_admin", "tip_mic")):
             lab.setText(f"<span style='font-weight:600'>{ui(L, key + '_b')}</span> "
                         f"<span style='color:{TEXT_2}'>{ui(L, key)}</span>")
-        self.stack.setCurrentIndex(2 if self.showing_notes else (1 if self.game else 0))
+
+        for b in (self.s_chat, self.w_chat):
+            b.setText(ui(L, "chat_is_open" if self.chat_open else "chat_open"))
+        self.set_back.setText(ui(L, "notes_back"))
+        if self.view not in VIEWS or (self.view == "notes" and not self.notes_enabled):
+            self.view = "ombri"
+        index = {"notes": 2, "settings": 3}.get(self.view, 1 if self.game else 0)
+        self.stack.setCurrentIndex(index)
+        self.guide.small_orb.set_state(self.state)
+        self.guide.set_game(self.game)
+        self.guide.setVisible(self.view == "ombri" and self.guide.active)
+        if self.guide.isVisible():
+            self.guide.raise_()
+        for orb in (self.s_orb, self.w_orb):
+            orb.setVisible(not self.guide.active)  # the drop took its place
 
     def set_state(self, state: str) -> None:
         self.state = state
+        self.chat.set_state(state)
         self._refresh()
 
     def set_connection(self, conn: str) -> None:
         self.conn = conn
+        self.chat.set_connection(conn)
+        if conn == "offline":
+            self.chat.turn_failed()
         self._refresh()
 
     def set_game(self, name: str | None) -> None:
         if name:  # sticky, like the client's own active_game
             self.game = name
+            self.chat.set_game(name)
             self._refresh()
 
     def set_voice_level(self, level: float) -> None:
         self.s_orb.feed_voice(level)
         self.w_orb.feed_voice(level)
+        self.guide.small_orb.feed_voice(level)
+        self.chat.set_voice_level(level)
 
     def set_usage(self, count: int, cap: int) -> None:
         self.usage = (count, cap)
@@ -720,15 +768,17 @@ class MainWindow(QWidget):
         self.lang = lang if lang in UI else "pt"
         self.voice_label = voice_label
         self.keys = {"ask": keys.get("ask", "F8"), "note": keys.get("note", "F6"), "pad": keys.get("pad")}
+        self.chat.set_language(self.lang, self.keys)
+        self.guide.set_language(self.lang, self.keys)
         self._rebuild_keys()
         self._refresh()
 
     # ------------------------------------------------------------------ notes
     def set_features(self, features: list) -> None:
-        self.notes_enabled = "notes" in {str(f) for f in features}
-        if not self.notes_enabled:
-            self.showing_notes = False
-        self._refresh()
+        names = {str(f) for f in features}
+        self.notes_enabled = "notes" in names
+        self.guide_enabled = "build_guide" in names
+        self._refresh()  # drops the notes view when the feature is gone
 
     def set_notes(self, items: list[dict], error: str = "") -> None:
         self.notes = [n for n in items if isinstance(n, dict)]
@@ -736,16 +786,112 @@ class MainWindow(QWidget):
         self._render_notes()
 
     def open_notes(self) -> None:
-        """The button: show the page in its loading state and ask main.py."""
-        self.showing_notes = True
+        """The button or the nav: show the page in its loading state and ask main.py."""
+        if not self.notes_enabled:
+            self._refresh()  # the nav button stays on the current view
+            return
+        self.view = "notes"
         self.notes, self.notes_error = None, ""
         self._render_notes()
         self._refresh()
         self.notes_requested.emit()
 
     def close_notes(self) -> None:
-        self.showing_notes = False
+        self.open_ombri()
+
+    # ------------------------------------------------------------------ views
+    def open_ombri(self) -> None:
+        self.view = "ombri"
         self._refresh()
+
+    # ------------------------------------------------------------------ the chat beside the home column
+    def toggle_chat(self) -> None:
+        if self.chat_open:
+            self.close_chat()
+        else:
+            self.open_chat()
+
+    def open_chat(self, tab: int | None = None) -> None:
+        """The window widens to the right (~300 ms, eased) and the chat fades
+        in beside the home column, which doesn't move. If the screen's right
+        edge is in the way, the window slides left just enough."""
+        if tab is not None:
+            self.chat.open_tab(tab)
+        if self.chat_open:
+            return
+        self.chat_open = True
+        screen = self.screen().availableGeometry() if self.screen() else None
+        if screen is not None and self.isVisible():
+            overflow = self.x() + WINDOW_W + CHAT_W - screen.right()
+            if overflow > 0:
+                self.move(max(screen.left(), self.x() - overflow), self.y())
+        motion.fade_in(self.chat, ms=motion.LAYOUT, rise=0)
+        self._chat_spring.to(float(CHAT_W))
+        self._refresh()
+        self.chat_toggled.emit(True)
+        QTimer.singleShot(motion.LAYOUT if motion.enabled() else 0, self, self.chat.input.edit.setFocus)
+
+    def close_chat(self) -> None:
+        if not self.chat_open:
+            return
+        self.chat_open = False
+        self._chat_spring.to(0.0)
+        self._refresh()
+        self.chat_toggled.emit(False)
+
+    def _set_chat_w(self, value: float) -> None:
+        self._chat_w = int(round(max(0.0, min(float(CHAT_W), value))))
+        w = WINDOW_W + self._chat_w
+        self.setFixedSize(w, WINDOW_H)
+        self.root.setGeometry(0, 0, w, WINDOW_H)
+
+    def open_settings(self) -> None:
+        """The "Configurações" buttons and the tray: the panel, with the
+        values the file has right now (edits in progress are kept when the
+        panel is already the view)."""
+        if self.view != "settings":
+            self.settings.reload()
+        self.view = "settings"
+        self._refresh()
+
+    # ------------------------------------------------------------------ the Build pane
+    def _orb_origin(self) -> tuple[QPointF, float, float]:
+        """The visible orb's body in the overlay's coordinates: where the drop starts."""
+        orb = self.s_orb if self.stack.currentIndex() == 1 else self.w_orb
+        centre, rx, ry = orb.shape()
+        root = self.guide.parentWidget()
+        return self.guide.mapFrom(root, orb.mapTo(root, centre.toPoint())).toPointF(), rx, ry
+
+    def guide_message(self, msg: dict) -> None:
+        """A `guide` message from main.py (the server's, or a REST click-open):
+        the pane applies it. The morph plays only when the Ombri view is on
+        screen; elsewhere the pane settles and shows when the view comes back."""
+        on_screen = self.view == "ombri" and self.isVisible()
+        self.guide.apply(msg, self._orb_origin() if on_screen else None, animate=on_screen)
+        self._refresh()
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        if obj is self.stack and event.type() in (QEvent.Type.Resize, QEvent.Type.Move):
+            # The stack sits inside the home column now: map it into the root.
+            top_left = self.stack.mapTo(self.root, QPoint(0, 0))
+            self.guide.setGeometry(QRect(top_left, self.stack.size()))
+        return super().eventFilter(obj, event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - the pane's keys: arrows, Home/End, 1-9, Esc
+        if self.view == "ombri" and self.guide.active and self.guide.handle_key(event):
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    # ------------------------------------------------------------------ chat
+    def chat_question(self, text: str, game: str | None = None) -> None:
+        self.chat.add_question(text, game)
+
+    def chat_answer(self, piece: str) -> None:
+        self.chat.append_answer(piece)
+
+    def chat_cards(self, cards: list) -> None:
+        self.chat.set_cards(cards)
 
     # ------------------------------------------------------------------ window
     def show_and_raise(self) -> None:
@@ -755,8 +901,8 @@ class MainWindow(QWidget):
 
     def _hide_to_tray(self) -> None:
         self.hide()
-        if self.showing_notes:
-            self.showing_notes = False  # reopens on the status page
+        if self.view != "ombri":
+            self.view = "ombri"  # reopens on the status page (the chat stays as it was)
             self._refresh()
         self.hidden_to_tray.emit()
 

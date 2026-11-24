@@ -8,9 +8,9 @@ mockup:
 
   * the main window (client/gui/main_window.py) - shown at launch, hidden
     to the tray by its minimize/close buttons;
-  * the tray icon and its menu: Abrir Ombri, Pausar/Retomar, Configurações,
-    Sair (Qt's own tray icon - the pystray one in client/tray.py is no
-    longer used by the client);
+  * the tray icon and its menu: Abrir Ombri, Pausar/Retomar, Configurações
+    (opens the window on its settings view), Sair (Qt's own tray icon - the
+    pystray one in client/tray.py is no longer used by the client);
   * notices as a small pop-up above the tray (the game-runs-as-admin one
     has a "Reabrir como admin" button), shown without taking focus from
     the game.
@@ -31,10 +31,22 @@ stdin, JSON lines from the client:
   {"type": "show"}
   {"type": "features", "list": [str]}            # what the server can do ("notes", "recap")
   {"type": "notes", "items": [{id, game, note, created, source}], "error": str}
+  {"type": "chat_question", "text": str, "game": str|null}   # the turn's question (turn_meta) - Chat view
+  {"type": "chat_answer", "text": str}           # a piece of the answer, appended to the newest turn
+  {"type": "chat_cards", "cards": [{kind, url, title, site, thumb}]}  # under the newest answer (phase 2 sends)
+  {"type": "chat_stage", "stage": "screen"}      # the client took a screenshot for this turn
+  {"type": "chat_done", "outcome": str}          # the turn ended ("failed" when the connection dropped)
+  {"type": "chat_confirm", "text": str}          # a typed note: show "Sim, guardar" / "Não"
+The chat's questions and answers live in memory only. The cards' links (url,
+title, site, kind, game, time - never the question) are kept on this PC by
+client/links_store.py for the Links tab (owner decision, 2026-11-23).
 stdout, JSON lines back to the client (the ONLY thing written there - every
 diagnostic print goes to stderr, i.e. output/overlay.log):
-  {"cmd": "quit" | "pause" | "resume" | "settings" | "relaunch_admin" | "survey_open" | "survey_later"
-          | "notes_list" | "notes_delete:<id>"}
+  {"cmd": "quit" | "pause" | "resume" | "relaunch_admin" | "survey_open" | "survey_later"
+          | "notes_list" | "notes_delete:<id>" | "recap_save:<id>" | "game_set:<name>" | "games_list"
+          | "chat_send:{text, remember}" | "chat_mic" | "chat_confirm:yes|no"}
+("settings" is no longer sent: since 2026-11-21 the settings are a panel of
+the main window; main.py still answers it for an older UI build.)
 Exits on stdin EOF, i.e. whenever the client exits.
 """
 from __future__ import annotations
@@ -47,40 +59,44 @@ import threading
 import time
 
 from PySide6.QtCore import QObject, QPoint, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QIcon, QPixmap
+from PySide6.QtGui import QAction, QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QSystemTrayIcon, QVBoxLayout,
-    QWidget, QWidgetAction,
+    QApplication, QComboBox, QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QMenu, QPushButton,
+    QSystemTrayIcon, QVBoxLayout, QWidget, QWidgetAction,
 )
 
 from client.gui.fonts import BODY_FAMILY, HEADING_FAMILY, ensure_fonts_loaded
 from client.gui.main_window import CHIP_TEXT, TEXT, TEXT_2, MainWindow, line_icon
+from client.gui.widgets import ACCENT, BG, CARD, CONTROL, TEXT_3
 from client.gui import indicator
 from client.gui.orb import claim_taskbar_identity, sphere_image
 from client.gui.overlay import DARK_THEME, HudState, OverlayWindow
 from client.gui.ui_texts import ui
+from client import links_store
 
 STATES = {s.value: s for s in HudState}
+SHADOW_PAD = 14  # px around a notice for its soft shadow
+LISTEN_BLUE = "#5B7CFF"  # the palette's listening colour
 NOTICE_SECONDS = 20
 RECAP_NOTICE_SECONDS = 90  # the game just closed: give the player time to see it (server keeps it 30 min)
 
 MENU_QSS = f"""
-QMenu {{ background: #2B2B2B; border: 1px solid #3A3A3A; border-radius: 8px; padding: 4px; }}
+QMenu {{ background: {CARD}; border: 1px solid rgba(255, 255, 255, 18); border-radius: 10px; padding: 4px; }}
 QMenu::item {{ color: {TEXT}; font-family: "{BODY_FAMILY}"; font-size: 14px; padding: 9px 14px 9px 10px;
                border-radius: 4px; }}
-QMenu::item:selected {{ background: #383838; }}
+QMenu::item:selected {{ background: {CONTROL}; }}
 QMenu::icon {{ padding-left: 10px; }}
-QMenu::separator {{ height: 1px; background: #3D3D3D; margin: 4px 0; }}
+QMenu::separator {{ height: 1px; background: rgba(255, 255, 255, 18); margin: 4px 0; }}
 """
 
 TOAST_QSS = f"""
-QFrame#toast {{ background: #202020; border: 1px solid #333333; border-radius: 8px; }}
+QFrame#toast {{ background: {BG}; border: 1px solid rgba(255, 255, 255, 18); border-radius: 12px; }}
 QLabel {{ color: {TEXT}; font-family: "{BODY_FAMILY}"; background: transparent; }}
-QPushButton {{ height: 36px; border: none; border-radius: 6px; font-family: "{BODY_FAMILY}"; font-size: 13px; }}
-QPushButton#yes {{ background: #FF6B4A; color: #1A0E0A; font-weight: 700; }}
+QPushButton {{ height: 36px; border: none; border-radius: 8px; font-family: "{BODY_FAMILY}"; font-size: 13px; }}
+QPushButton#yes {{ background: {ACCENT}; color: #14161C; font-weight: 700; }}
 QPushButton#yes:hover {{ background: #FF8062; }}
-QPushButton#no {{ background: #3A3A3A; color: {TEXT}; font-weight: 600; }}
-QPushButton#no:hover {{ background: #454545; }}
+QPushButton#no {{ background: {CONTROL}; color: {TEXT}; font-weight: 600; }}
+QPushButton#no:hover {{ background: #343946; }}
 """
 
 
@@ -139,33 +155,45 @@ class Notice(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setStyleSheet(TOAST_QSS)
-        self.setFixedWidth(364)
+        self.setFixedWidth(364 + 2 * SHADOW_PAD)
         frame = QFrame(self)
         frame.setObjectName("toast")
+        shadow = QGraphicsDropShadowEffect(frame)  # the panels' soft shadow, not a hard edge
+        shadow.setBlurRadius(28)
+        shadow.setOffset(0, 6)
+        shadow.setColor(QColor(0, 0, 0, 150))
+        frame.setGraphicsEffect(shadow)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setContentsMargins(SHADOW_PAD, SHADOW_PAD // 2, SHADOW_PAD, SHADOW_PAD + 4)
         lay.addWidget(frame)
         col = QVBoxLayout(frame)
-        col.setContentsMargins(16, 16, 16, 16)
-        col.setSpacing(10)
+        col.setContentsMargins(18, 16, 18, 18)
+        col.setSpacing(8)
         head = QHBoxLayout()
         head.setSpacing(8)
         dot = QLabel()
-        dot.setPixmap(QPixmap.fromImage(indicator.icon_image(28)).scaled(
-            14, 14, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        dot.setPixmap(QPixmap.fromImage(indicator.icon_image(40)).scaled(
+            20, 20, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
         app = QLabel("Ombri")
-        app.setStyleSheet(f"font-size: 12px; color: {CHIP_TEXT};")
+        app.setStyleSheet(f"font-size: 13px; font-weight: 700; color: {TEXT};")
         head.addWidget(dot)
         head.addWidget(app)
         head.addStretch(1)
         col.addLayout(head)
         self.title = QLabel()
-        self.title.setStyleSheet("font-size: 15px; font-weight: 700;")
+        self.title.setWordWrap(True)
+        self.title.setStyleSheet("font-size: 16px; font-weight: 700;")
         self.body = QLabel()
         self.body.setWordWrap(True)
-        self.body.setStyleSheet(f"font-size: 13px; color: {CHIP_TEXT};")
+        self.body.setStyleSheet(f"font-size: 13px; color: {TEXT_2};")
+        col.addSpacing(2)
         col.addWidget(self.title)
         col.addWidget(self.body)
+        # "Ouvindo..." while Ombri waits for a spoken answer (the game question)
+        self.listening = QLabel()
+        self.listening.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {LISTEN_BLUE};")
+        self.listening.hide()
+        col.addWidget(self.listening)
         buttons = QHBoxLayout()
         buttons.setSpacing(8)
         self.yes = QPushButton()
@@ -196,9 +224,11 @@ class Notice(QWidget):
             self._on_no()
 
     def pop(self, title: str, body: str, yes: str | None, no: str | None, on_yes=None, on_no=None,
-            seconds: int = NOTICE_SECONDS) -> None:
+            seconds: int = NOTICE_SECONDS, listening: str = "") -> None:
         self.title.setText(title)
         self.body.setText(body)
+        self.listening.setText(f"●  {listening}" if listening else "")
+        self.listening.setVisible(bool(listening))
         self.yes.setVisible(bool(yes))
         self.no.setVisible(bool(no))
         self.yes.setText(yes or "")
@@ -207,16 +237,16 @@ class Notice(QWidget):
         self._on_no = on_no
         self.adjustSize()
         geo = QApplication.primaryScreen().availableGeometry()
-        self.move(QPoint(geo.right() - self.width() - 16, geo.bottom() - self.height() - 16))
+        self.move(QPoint(geo.right() - self.width() - 16 + SHADOW_PAD, geo.bottom() - self.height() - 16 + SHADOW_PAD))
         self.show()
         _no_activate(self)
         self._timer.start(seconds * 1000)
 
 
 PICKER_QSS = TOAST_QSS + f"""
-QComboBox {{ background: #2B2B2B; color: {TEXT}; border: 1px solid #3A3A3A; border-radius: 6px;
+QComboBox {{ background: {CARD}; color: {TEXT}; border: 1px solid rgba(255, 255, 255, 18); border-radius: 8px;
              padding: 6px 10px; font-family: "{BODY_FAMILY}"; font-size: 14px; min-height: 24px; }}
-QComboBox QAbstractItemView {{ background: #2B2B2B; color: {TEXT}; selection-background-color: #383838; }}
+QComboBox QAbstractItemView {{ background: {CARD}; color: {TEXT}; selection-background-color: {CONTROL}; }}
 """
 GAME_NAME_MAX = 80  # same cap as client/main.py
 
@@ -350,13 +380,28 @@ class Ui:
         self.told_tray = False
         self.state = "idle"
 
-        self.window.settings_requested.connect(lambda: _send("settings"))
         self.window.hidden_to_tray.connect(self._hidden)
         # "Minhas notas" (docs/player_notes.md): the window asks, main.py
         # answers with a "notes" message after calling the server.
         self.window.notes_requested.connect(lambda: _send("notes_list"))
         self.window.note_delete_requested.connect(lambda note_id: _send("notes_delete:" + note_id))
         self.window.game_pick_requested.connect(self.open_picker)
+        # The chat (docs/chat_redesign.md): typed messages and the mic go to main.py;
+        # the Links tab reads client/links_store.py when the chat opens.
+        self.window.chat_send_requested.connect(
+            lambda text, remember: _send("chat_send:" + json.dumps({"text": text, "remember": bool(remember)},
+                                                                   ensure_ascii=False)))
+        self.window.chat_mic_requested.connect(lambda: _send("chat_mic"))
+        self.window.chat_confirm_answered.connect(lambda yes: _send("chat_confirm:" + ("yes" if yes else "no")))
+        self.window.chat_toggled.connect(
+            lambda on: on and self.window.chat.set_links(links_store.load(self.links_path)))
+        self._links_path = None  # None = %APPDATA%/Parca/links.json (a test sets a scratch path)
+        # The Build pane (client/gui/build_pane.py): where it is, so main.py's
+        # next turn_start.guide says so; its clicks that need the server.
+        self.window.guide_state_changed.connect(
+            lambda gid, layer, listing: _send(f"guide_state:{gid}:{layer}" + (":list" if listing else "")))
+        self.window.guide_open_requested.connect(lambda gid: _send("guide_open:" + gid))
+        self.window.guide_list_requested.connect(lambda: _send("guide_list:" + (self.window.game or "")))
 
         self.tray = QSystemTrayIcon(indicator.tray_icon())
         self.tray.setToolTip("Ombri")
@@ -379,7 +424,7 @@ class Ui:
         self.a_open.triggered.connect(self.window.show_and_raise)
         self.a_game.triggered.connect(self.open_picker)
         self.a_pause.triggered.connect(lambda: _send("resume" if self.paused else "pause"))
-        self.a_settings.triggered.connect(lambda: _send("settings"))
+        self.a_settings.triggered.connect(self.open_settings)
         self.a_quit.triggered.connect(lambda: _send("quit"))
         for a in (self.a_open, self.a_game, self.a_pause, self.a_settings):
             self.menu.addAction(a)
@@ -396,6 +441,17 @@ class Ui:
             self.window.show_and_raise()
 
     # ------------------------------------------------------------------ helpers
+
+    @property
+    def links_path(self):
+        return self._links_path
+
+    @links_path.setter
+    def links_path(self, path) -> None:
+        """The chat's Links file and the settings' "Limpar" use the same one."""
+        self._links_path = path
+        self.window.settings.advanced.links_path = path
+
     def _texts(self) -> None:
         L = self.window.lang
         self.a_open.setText(ui(L, "tray_open"))
@@ -413,6 +469,11 @@ class Ui:
     def open_picker(self) -> None:
         self.notice.hide()
         self.picker.open(self.window.lang, self.window.game)
+
+    def open_settings(self) -> None:
+        """The tray's "Configurações": the window, on its settings view."""
+        self.window.open_settings()
+        self.window.show_and_raise()
 
     def _tray_click(self, reason) -> None:
         if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
@@ -479,6 +540,27 @@ class Ui:
             self.window.set_notes(msg.get("items") or [], str(msg.get("error") or ""))
         elif kind == "games":
             self.picker.set_games([g for g in (msg.get("list") or []) if isinstance(g, str)])
+        elif kind == "chat_question":
+            game = msg.get("game")
+            self.window.chat_question(str(msg.get("text") or ""), str(game) if game else None)
+        elif kind == "chat_answer":
+            self.window.chat_answer(str(msg.get("text") or ""))
+        elif kind == "chat_cards":
+            cards = list(msg.get("cards")) if isinstance(msg.get("cards"), list) else []
+            self.window.chat_cards(cards)
+            if cards:  # kept on this PC for the Links tab: links only, never the question
+                self.window.chat.set_links(links_store.add(cards, self.window.game, self.links_path))
+        elif kind == "chat_stage":
+            self.window.chat.set_stage(str(msg.get("stage") or ""))
+        elif kind == "chat_done":
+            self.window.chat.turn_done(str(msg.get("outcome") or ""))
+        elif kind == "chat_confirm":
+            self.window.chat.ask_confirm(str(msg.get("text") or ""))
+        elif kind == "chat_open":
+            self.window.show_and_raise()
+            self.window.open_chat(1 if msg.get("tab") == "links" else 0)
+        elif kind == "guide":
+            self.window.guide_message(msg)
         elif kind == "echo_cmd":
             # Test hook (eval/client_ui_harness.py): proves the command
             # channel end to end without a mouse. The client never sends it.
@@ -514,11 +596,26 @@ class Ui:
             # need the pop-up about the game we're playing"). The answer is
             # spoken; the picker stays reachable on purpose from the game card's
             # "Trocar" and the tray's "Jogo", both of which need a click.
-            self.notice.pop(ui(L, "pick_title"), ui(L, "game_ask_body"), None, None)
+            self.notice.pop(ui(L, "pick_title"), ui(L, "game_ask_body"), None, None,
+                            listening=ui(L, "notice_listening"))
         elif kind == "recap_saved":
             self.notice.pop(ui(L, "recap_saved_title"), ui(L, "recap_saved_body"), None, None, seconds=6)
         elif kind == "recap_failed":
             self.notice.pop(ui(L, "recap_failed_title"), ui(L, "recap_failed_body"), None, None, seconds=8)
+        elif kind == "own_key" and (msg or {}).get("category") in ("voice", "ears"):
+            # The player's own key failed (owner, 2026-11-23: "the user should get
+            # prompted that the keys don't work"). The card in Avançado says it too.
+            from client.gui.own_keys_panel import why_text
+            cat = str(msg["category"])
+            why = why_text(L, str(msg.get("code") or "other"), str(msg.get("detail") or ""))
+            self.window.settings.advanced.mark_failed(cat, str(msg.get("code") or "other"), str(msg.get("detail") or ""))
+
+            def open_advanced() -> None:
+                self.window.show_and_raise()
+                self.window.open_settings()
+                self.window.settings.show_advanced()
+            self.notice.pop(ui(L, f"own_key_title_{cat}"), ui(L, "own_key_body", why=why[:1].upper() + why[1:]),
+                            ui(L, "own_key_open"), ui(L, "own_key_ok"), on_yes=open_advanced, seconds=20)
 
 
 def main() -> None:

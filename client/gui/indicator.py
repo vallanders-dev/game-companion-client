@@ -29,11 +29,13 @@ def eyes() -> bool:  # kept for older callers
 
 
 def draw(painter: QPainter, center: QPointF, box: float, state: str, t: float, *, level: float = 0.0,
-         calm: bool = False, backing: QColor | None = None, ring: QColor | None = None) -> None:
-    """Draw the picked character (not the sphere) in a `box` square at `center`."""
+         calm: bool = False, backing: QColor | None = None, ring: QColor | None = None,
+         look: tuple[float, float] | None = None) -> None:
+    """Draw the picked character (not the sphere) in a `box` square at `center`.
+    `look` (-1..1 each way): where the cursor is; the shadow's eyes follow it."""
     if STYLE == "shadow":
         from client.gui.shadow import draw_shadow
-        draw_shadow(painter, center, box, state, t, level=level, calm=calm, ring=ring)
+        draw_shadow(painter, center, box, state, t, level=level, calm=calm, ring=ring, look=look)
     else:
         from client.gui.eyes import draw_eyes
         draw_eyes(painter, center, box, state, t, level=level, calm=calm, backing=backing, ring=ring)
@@ -51,14 +53,18 @@ def icon_image(size: int) -> QImage:
 
 
 def app_icon() -> QIcon:
-    """The window / taskbar icon."""
+    """The window / taskbar icon: the head (the tray has the disc)."""
+    if STYLE == "shadow":
+        from client.gui.shadow import shadow_icon
+        return shadow_icon()
     return tray_icon()
 
 
 def tray_icon() -> QIcon:
-    """The tray's icon: the shadow when it's the picked look, else the sphere."""
+    """The tray's icon: with the shadow, the in-game disc (dark, with the neon
+    rim; owner, 2026-11-19), else the sphere."""
     if STYLE == "shadow":
-        from client.gui.shadow import shadow_icon
-        return shadow_icon()
+        from client.gui.shadow import disc_icon
+        return disc_icon()
     from client.gui.orb import sphere_image
     return QIcon(QPixmap.fromImage(sphere_image(64)))

@@ -19,8 +19,24 @@ Modes, set by client/main.py:
   fires `shush` - the barge-in watcher stops the answer, nothing else starts.
 - None (the client is recording through its own stream): audio is ignored.
 
-`wake` and `shush` duck-type HotkeyManager (clear()/pressed()), so they race
-with F8/F6/the gamepad in the same wait loops, untouched.
+The Build pane's words (server/build_guide.py; build guide PR 4, 2026-11-23):
+while a guide is open (`set_guide(True)`) and the mode is "wake", a second
+recognizer on the language's own model hears GUIDE_PHRASES - "próxima" /
+"volta" / "repete" (en "next" / "back" / "repeat", es "siguiente" / "atrás" /
+"repite") - and fires `guide` with the command when one is said ALONE at
+MIN_CONF, the stop-words rule: instant, free, on the PC. "Próxima camada",
+"volta uma", "quanto falta de tábua?" and everything else still need the name
+or F8 and go through the server's matcher ("[unk] próxima" never fires here).
+ALONE is checked twice: the utterance is that one word, AND the VAD hears no
+speech around it (said_alone) - the grammar decoder decodes the rest of a
+sentence as silence, so "próxima camada" alone would have fired. The words
+were checked against the three pinned models' vocabularies (their Gr.fst
+symbol tables, 2026-11-23): the pt model has only the accented "próxima", so
+that is the form listed, and the grammar goes to Vosk as raw UTF-8
+(grammar_json) - it does not decode json's \\u escapes.
+
+`wake`, `shush` and `guide` duck-type HotkeyManager (clear()/pressed()), so
+they race with F8/F6/the gamepad in the same wait loops, untouched.
 
 Models are downloaded once into %LOCALAPPDATA%/Parca/models (sha256-pinned),
 on first use - never in the installer (the feature is opt-in).
@@ -42,7 +58,10 @@ RATE = 16000
 BLOCK = 1600  # 0.1 s
 RING_SECONDS = 30
 MIN_CONF = 0.9
-WAKE_PHRASES = ["hey omri", "omri"]
+WAKE_PHRASES = ["hey omri", "omri", "wake up omri"]
+# "Wake up, Ombri" (Tony, 2026-11-23): the name comes LAST, so the whole
+# utterance is the command - kept as audio, never a bare name that waits.
+WHOLE_COMMANDS = {"wake up omri"}
 SHUSH_PHRASES = {
     "pt": ["chega", "silencio", "chega ombro"],
     "en": ["stop", "quiet", "enough", "shush", "stop omri"],
@@ -51,6 +70,18 @@ SHUSH_PHRASES = {
     # vocabulary (and the pt model's, the fallback). "ya basta" / "cállate"
     # can come later, measured in eval/kws_probe.py as the others were.
     "es": ["basta", "silencio"],
+}
+# The Build pane's local words, per MODEL language (the model that hears the
+# stop words hears these too): what is said -> the pane command. Each must be
+# in that model's vocabulary, else Vosk drops it from the grammar in silence
+# ("Ignoring word missing in vocabulary"); checked 2026-11-23 in the three
+# pinned models' Gr.fst symbol tables - pt lacks the unaccented "proxima",
+# es has both "atrás" and "atras". One word each, said alone: a longer
+# utterance comes out as "[unk]" around it and never fires.
+GUIDE_PHRASES = {
+    "pt": {"próxima": "next", "volta": "back", "repete": "repeat"},
+    "en": {"next": "next", "back": "back", "repeat": "repeat"},
+    "es": {"siguiente": "next", "atrás": "back", "repite": "repeat"},
 }
 # Audio kept before the name's first word, so its start isn't clipped.
 PRE_ROLL_SECONDS = 0.25
@@ -66,6 +97,18 @@ VAD_THRESHOLD = 0.5
 # "acorda", spoken before the client's recording had opened (owner's retakes,
 # 2026-11-04). So a bare name waits this long for more speech before it fires.
 NAME_PAUSE_SECONDS = 0.8
+# The pane's words count only when said ALONE: no speech (Silero VAD) this
+# long before the word nor after it. Vosk's small models, given a three-word
+# grammar, decode the REST of a sentence as silence - "próxima camada" came
+# out as "próxima" alone at conf 1.00, and ordinary Spanish talk popped
+# "atrás" / "repite" seven times a minute (eval/guide_words_probe.py,
+# 2026-11-23). The recognizer's end-point already means >= 0.5 s of
+# (decoded) quiet after the word; the VAD is asked whether it really was.
+GUIDE_GAP_SECONDS = 0.5
+# The word's own edges, left out of the windows: Vosk's times are a little
+# off, the END more so - the grammar decoder gave "repete" as 1.56-2.04 s
+# with the VAD hearing it until 2.27 s (its last syllable taken for silence).
+GUIDE_EDGE_SECONDS = (0.15, 0.3)  # (before the start, after the end)
 
 MODELS = {
     "en": ("vosk-model-small-en-us-0.15",
@@ -106,7 +149,7 @@ def ensure_model(lang: str, base: Path | None = None, fetch=None) -> Path:
         raise ValueError(f"modelo {name}: sem sha256 pinado em MODELS")
     base = base or models_dir()
     target = base / name
-    if (target / "am").exists() or (target / "conf").exists():
+    if model_present(target):
         return target
     data = (fetch or _download)(MODEL_URL.format(name=name))
     got = hashlib.sha256(data).hexdigest()
@@ -120,6 +163,29 @@ def ensure_model(lang: str, base: Path | None = None, fetch=None) -> Path:
                 raise ValueError(f"modelo {name}: caminho inválido no zip")
         z.extractall(base)
     return target
+
+
+def model_present(target: Path) -> bool:
+    """An unpacked model: the acoustic model file in either of Vosk's layouts
+    - `am/final.mdl` (en-us-0.15, es-0.42) or `final.mdl` at the root (the
+    older flat layout of pt-0.3). Until 2026-11-23 only `am/` or `conf/` was
+    looked for, so the Portuguese model was downloaded again (31 MB) at every
+    listener start."""
+    return (target / "am" / "final.mdl").exists() or (target / "final.mdl").exists()
+
+
+def guide_words(model_language: str) -> dict[str, str]:
+    """The pane's words for the model that hears the stop words (pt when the
+    language's own model isn't pinned, like the stop words themselves)."""
+    return GUIDE_PHRASES.get(model_language) or GUIDE_PHRASES["pt"]
+
+
+def guide_word(language: str, command: str) -> str:
+    """What a player says for a pane command in a voice's language ("repete"
+    for pt "repeat"): the console line, and the typed question main.py sends
+    for "repeat" (in the voice's language, the one the server matches)."""
+    words = GUIDE_PHRASES.get(listener_language(language)) or GUIDE_PHRASES["pt"]
+    return next((w for w, c in words.items() if c == command), command)
 
 
 def _download(url: str) -> bytes:
@@ -136,16 +202,19 @@ class VoiceTrigger:
         self.hotkey = name
         self._event = threading.Event()
         self._audio: bytes | None = None
+        self._command: str | None = None  # the guide trigger: "next" / "back" / "repeat"
         self._lock = threading.Lock()
 
-    def fire(self, audio: bytes | None = None) -> None:
+    def fire(self, audio: bytes | None = None, command: str | None = None) -> None:
         with self._lock:
             self._audio = audio
+            self._command = command
             self._event.set()
 
     def clear(self) -> None:
         with self._lock:
             self._audio = None
+            self._command = None
             self._event.clear()
 
     def pressed(self) -> bool:
@@ -155,6 +224,21 @@ class VoiceTrigger:
         with self._lock:
             audio, self._audio = self._audio, None
             return audio
+
+    def take_command(self) -> str | None:
+        with self._lock:
+            command, self._command = self._command, None
+            return command
+
+
+def grammar_json(phrases: list[str]) -> str:
+    """The grammar KaldiRecognizer takes: the phrases plus "[unk]", as raw
+    UTF-8. json.dumps' default `\\u00f3` escapes are NOT decoded by Vosk's
+    grammar parser - it logged "Ignoring word missing in vocabulary:
+    'pr\\u00f3xima'" and dropped the word (eval/guide_words_probe.py,
+    2026-11-23); the name and the stop words are plain ASCII, so they never
+    met this."""
+    return json.dumps(list(phrases) + ["[unk]"], ensure_ascii=False)
 
 
 def to_wav(samples) -> bytes:
@@ -177,11 +261,52 @@ def match(words: list[dict], mode: str, shush: list[str]) -> str | None:
         for phrase in WAKE_PHRASES:
             pw = phrase.split()
             if tokens[:len(pw)] == pw and min(confs[:len(pw)]) >= MIN_CONF:
-                return "wake+" if len(tokens) > len(pw) else "wake"
+                return "wake+" if len(tokens) > len(pw) or phrase in WHOLE_COMMANDS else "wake"
     elif mode == "shush":
         if " ".join(tokens) in shush and min(confs) >= MIN_CONF:
             return "shush"
     return None
+
+
+def match_guide(words: list[dict], phrases: dict[str, str]) -> str | None:
+    """The pane command ("next" / "back" / "repeat") when the finished
+    utterance IS one guide word (GUIDE_PHRASES) at conf >= MIN_CONF - the
+    stop-words rule. "[unk] próxima", "próxima [unk]" and a low-confidence
+    word are None: those go through the name or F8 and the server."""
+    if len(words) != 1:
+        return None
+    word = words[0]
+    if word.get("conf", 1.0) < MIN_CONF:
+        return None
+    return phrases.get(word.get("word", ""))
+
+
+def said_alone(ring, total: int, first: int, word: dict, vad) -> bool:
+    """Was the guide word spoken on its own? True when the VAD hears no
+    speech in the GUIDE_GAP_SECONDS before it nor in the audio after it (up
+    to now - at least the recognizer's own end-point quiet). `ring` is the
+    listener's circular int16 buffer holding samples up to `total`; `first`
+    is the index of the first sample the guide recognizer heard, which its
+    word times count from. The VAD's state is reset around the check: it
+    is the listener's own instance (not the recorder's)."""
+    import numpy as np
+
+    start = first + int(word.get("start", 0.0) * RATE)
+    end = first + int(word.get("end", 0.0) * RATE)
+    lead, trail = (int(e * RATE) for e in GUIDE_EDGE_SECONDS)
+    gap = int(GUIDE_GAP_SECONDS * RATE)
+    oldest = max(total - len(ring) + 1, 0)
+    windows = ((max(start - gap, oldest), max(start - lead, oldest)), (min(end + trail, total), total))
+    vad.reset_states()
+    try:
+        for lo, hi in windows:
+            for i in range(lo, hi - 511, 512):
+                frame = ring[np.arange(i, i + 512) % len(ring)].astype(np.float32) / 32768.0
+                if vad(frame) >= VAD_THRESHOLD:
+                    return False
+        return True
+    finally:
+        vad.reset_states()
 
 
 class VoiceListener:
@@ -190,7 +315,9 @@ class VoiceListener:
         self.base = base
         self.wake = VoiceTrigger("voz:ei-ombri")
         self.shush = VoiceTrigger("voz:chega")
+        self.guide = VoiceTrigger("voz:guia")  # the Build pane's own words, while a guide is open
         self._mode: str | None = "wake"
+        self._guide_open = False
         self._mode_lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -206,6 +333,17 @@ class VoiceListener:
     @property
     def mode(self) -> str | None:
         return self._mode
+
+    def set_guide(self, open_: bool) -> None:
+        """Whether a build guide is open in the pane (client/main.py keeps it
+        in step with its `_GUIDE` mirror): the guide words are heard only
+        then, and only in "wake" mode."""
+        with self._mode_lock:
+            self._guide_open = bool(open_)
+
+    @property
+    def guide_open(self) -> bool:
+        return self._guide_open
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, name="voice-commands", daemon=True)
@@ -231,9 +369,13 @@ class VoiceListener:
             return
         shush = SHUSH_PHRASES[self.language]
         grammars = {"wake": (en, WAKE_PHRASES), "shush": (shush_model, shush)}
+        # The pane's words: the language's own model (the stop words' one),
+        # fed the same blocks as the wake recognizer while a guide is open.
+        guide = guide_words(shush_lang)
         ring = np.zeros(RATE * RING_SECONDS, dtype=np.int16)
         total = 0  # samples captured since start
         rec, rec_mode, rec_start = None, None, 0
+        grec, grec_first = None, 0  # the guide recognizer, only in "wake" mode with a guide open
         capture_from: int | None = None  # sample index while capturing a question
         quiet = 0.0
         name_only = False  # capturing, and nothing has followed the name yet
@@ -273,11 +415,25 @@ class VoiceListener:
                 mode = None if self.paused else self._mode
                 if mode != rec_mode:
                     rec, rec_mode, rec_start = None, mode, total
+                    grec = None  # its audio continuity broke too: built again below
                     if mode in grammars:
                         model, phrases = grammars[mode]
-                        rec = KaldiRecognizer(model, RATE, json.dumps(phrases + ["[unk]"]))
+                        rec = KaldiRecognizer(model, RATE, grammar_json(phrases))
                         rec.SetWords(True)
-                if rec is None or not rec.AcceptWaveform(mono.tobytes()):
+                guide_on = mode == "wake" and self._guide_open
+                if guide_on != (grec is not None):
+                    grec = None
+                    if guide_on:
+                        grec = KaldiRecognizer(shush_model, RATE, grammar_json(list(guide)))
+                        grec.SetWords(True)
+                        grec_first = total - n  # this block is the first it hears
+                data = mono.tobytes()
+                if grec is not None and grec.AcceptWaveform(data):
+                    gwords = json.loads(grec.Result()).get("result") or []
+                    command = match_guide(gwords, guide) if gwords else None
+                    if command and said_alone(ring, total, grec_first, gwords[0], vad):
+                        self.guide.fire(command=command)
+                if rec is None or not rec.AcceptWaveform(data):
                     continue
                 words = json.loads(rec.Result()).get("result") or []
                 hit = match(words, mode, shush) if words else None

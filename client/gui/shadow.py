@@ -8,20 +8,22 @@ blue (owner's pick over coral only, 2026-11-19), with big pale eyes. No mouth, n
 
     idle         rests and bobs slowly, eyes dimmed, a blink every few seconds
     ouvindo      leans in, eyes wide, the rim brightens
-    pensando     tilts back, looks up to the side; in the main window the rim's
+    pensando     tilts back, kite-shaped eyes looking up to the side; the rim's
                  colours drift round it
     pesquisando  tilts the other way with a faint echo behind it (on the move)
     falando      half-moon eyes that open a little with the voice; the rim pulses
     pausado      eyes closed, the rim dim
 
-`calm=True` is the in-game look: just a dark disc with the neon rim (owner,
-2026-11-19). Its brightness shows the state and it pulses while speaking; nothing
-else moves while the player plays (owner, 2026-11-05).
+Every change between states is eased (`_Motion`, ~0.3 s), and in the main
+window the eyes follow the cursor (`look`). `calm=True` is the in-game look: just a dark disc with the neon rim (owner,
+2026-11-19). Its brightness shows the state and it pulses while speaking; since 2026-11-23 (Tony) its gradient
+circles the rim while listening, thinking or speaking. Nothing else moves while the player plays (owner, 2026-11-05).
 client/gui/indicator.py picks between this, the eyes and the sphere.
 """
 from __future__ import annotations
 
 import math
+import time
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QIcon, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
@@ -135,65 +137,136 @@ def _glow(painter: QPainter, path: QPainterPath, s: float, brush: QLinearGradien
     painter.setOpacity(1.0)
 
 
+# Eye shapes, one per state, as numbers so one state can melt into the next
+# (owner, 2026-11-19: smooth, animated changes between every state). Per eye:
+# (x, y) shift in head units; oy a shift in eye units; w width; ht / hb the height
+# above / below the eye's middle; k roundness (0.552 = an ellipse, 0 = straight
+# sides, a diamond); a opacity. Order: (left eye, right eye).
+_ROUND = 0.552
+_EYE_SHAPES = {
+    "idle":        ((0, 0, 0, .05, .05, .05, _ROUND, .7),) * 2,
+    "ouvindo":     ((.025, 0, 0, .058, .06, .06, _ROUND, 1),) * 2,
+    # Thinking: kite eyes looking up to the side (owner, 2026-11-19).
+    "pensando":    ((-.03, -.03, 0, .076, .05, .076, 0, 1),) * 2,
+    "pesquisando": ((.03, -.03, 0, .05, .05, .05, _ROUND, 1), (.03, -.03, 0, .05, .0275, .0275, _ROUND, 1)),
+    # Half-moons, flat side down: the top lifts more with the voice (_TALK_LIFT).
+    "falando":     ((0, 0, .018, .09, .034, .002, _ROUND, 1),) * 2,
+    "pausado":     ((0, 0, 0, .08, .0175, .0175, _ROUND, .45),) * 2,
+}
+_TALK_LIFT = .016    # extra half-moon height at full voice, eye units
+_BLINKS = {"idle": 1.0, "pensando": 1.0, "pesquisando": 1.0}
+_GAZE = {"idle": 1.0, "ouvindo": 1.0, "falando": .7, "pensando": .25, "pesquisando": .25, "pausado": 0.0}
+_SPIN = {"pensando": 40.0, "pesquisando": 40.0}      # rim colour drift, degrees a second
+_ECHO = {"pesquisando": .35}
+# In game (calm), the rim's gradient circles the disc while Ombri works (Tony,
+# 2026-11-23): degrees a second. Idle and paused stay still.
+_CALM_SPIN = {"ouvindo": 120.0, "pensando": 240.0, "pesquisando": 240.0, "falando": 90.0}
+_HAIR = {"pausado": .3}
+_BOB = {"idle": 1.0}
+SETTLE = 0.09        # seconds: the time constant of every change (~0.3 s to settle)
+_N_SCENE = 9         # numbers before the two eyes in _targets()
+
+
+def _targets(state: str) -> list[float]:
+    """The state's numbers: tilt, brightness, talking, hair sway, bob, rim spin,
+    echo, how much the eyes follow the cursor, blinking, then both eyes."""
+    tilt, bright = _POSE[state]
+    flat = [tilt, bright, 1.0 if state == "falando" else 0.0, _HAIR.get(state, 1.0), _BOB.get(state, 0.0),
+            _SPIN.get(state, 0.0), _ECHO.get(state, 0.0), _GAZE.get(state, 0.0), _BLINKS.get(state, 0.0)]
+    for eye in _EYE_SHAPES[state]:
+        flat.extend(float(v) for v in eye)
+    return flat
+
+
+class _Motion:
+    """What Ombri shows right now, eased toward the state's numbers every frame,
+    so a change of state (even mid-change) is a smooth move, never a jump."""
+
+    def __init__(self) -> None:
+        self.cur: list[float] | None = None
+        self.last = 0.0
+        self.angle = -40.0
+        self.calm_angle = -40.0
+        self.calm_speed = 0.0
+        self.gaze = [0.0, 0.0]
+
+    def step(self, state: str, look: tuple[float, float] | None, now: float) -> list[float]:
+        goal = _targets(state)
+        if self.cur is None:
+            self.cur, self.last = goal, now
+            return self.cur
+        dt = max(0.0, min(0.25, now - self.last))
+        self.last = now
+        f = 1.0 - math.exp(-dt / SETTLE)
+        self.cur = [c + (g - c) * f for c, g in zip(self.cur, goal)]
+        gx, gy = look or (0.0, 0.0)
+        fg = 1.0 - math.exp(-dt / 0.12)
+        self.gaze = [self.gaze[0] + (gx - self.gaze[0]) * fg, self.gaze[1] + (gy - self.gaze[1]) * fg]
+        self.angle = (self.angle + self.cur[5] * dt) % 360.0
+        self.calm_speed += (_CALM_SPIN.get(state, 0.0) - self.calm_speed) * (1.0 - math.exp(-dt / 0.25))
+        self.calm_angle = (self.calm_angle + self.calm_speed * dt) % 360.0
+        return self.cur
+
+
+_motions: dict[str, _Motion] = {}
+
+
+def _motion(key: str) -> _Motion:
+    if key not in _motions:
+        _motions[key] = _Motion()
+    return _motions[key]
+
+
+def _eye_path(cx: float, cy: float, w: float, ht: float, hb: float, k: float) -> QPainterPath:
+    """An eye from four points (left, top, right, bottom): k = 0.552 rounds it into
+    an ellipse, 0 makes a diamond; hb = 0 flattens the bottom (a half-moon)."""
+    hw = w / 2
+    path = QPainterPath(QPointF(cx - hw, cy))
+    path.cubicTo(QPointF(cx - hw, cy - ht * k), QPointF(cx - hw * k, cy - ht), QPointF(cx, cy - ht))
+    path.cubicTo(QPointF(cx + hw * k, cy - ht), QPointF(cx + hw, cy - ht * k), QPointF(cx + hw, cy))
+    path.cubicTo(QPointF(cx + hw, cy + hb * k), QPointF(cx + hw * k, cy + hb), QPointF(cx, cy + hb))
+    path.cubicTo(QPointF(cx - hw * k, cy + hb), QPointF(cx - hw, cy + hb * k), QPointF(cx - hw, cy))
+    path.closeSubpath()
+    return path
+
+
+def _eyes_from(painter: QPainter, s: float, m: list[float], gaze: tuple[float, float], t: float, level: float,
+               big: float, ey: float) -> None:
+    gap = 0.095 * s * (1 + (big - 1) * 0.5)
+    se = s * big
+    talk, gw, blink_w = m[2], m[7], m[8]
+    blink = 1.0 - blink_w * (0.85 if (t % BLINK_EVERY) < BLINK_LEN else 0.0)
+    gx, gy = gaze[0] * gw * 0.035 * s, gaze[1] * gw * 0.025 * s
+    painter.setPen(Qt.PenStyle.NoPen)
+    for i, side in enumerate((-1, 1)):
+        x, y, oy, w, ht, hb, k, a = m[_N_SCENE + 8 * i: _N_SCENE + 8 * (i + 1)]
+        ht = (ht + talk * _TALK_LIFT * level) * blink
+        col = QColor(EYE)
+        col.setAlphaF(max(0.0, min(1.0, a)))
+        painter.setBrush(col)
+        painter.drawPath(_eye_path(side * gap + x * s + gx, (ey + y) * s + oy * se + gy, w * se,
+                                   max(ht * se, 0.004 * se), max(hb * blink * se, 0.0), k))
+
+
 def _eyes(painter: QPainter, s: float, state: str, t: float, level: float, big: float = 1.0,
           ey: float = -0.14) -> None:
-    """`big` scales the eyes (in game they'd be ~2 px otherwise)."""
-    ey = ey * s
-    gap = 0.095 * s * (1 + (big - 1) * 0.5)
-    s_eye = s * big
-    col = QColor(EYE)
-    if state == "idle":
-        col.setAlphaF(0.7)
-    elif state == "pausado":
-        col.setAlphaF(0.45)
-
-    if state == "pausado":
-        pen = QPen(col, max(1.0, 0.035 * s_eye))
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        for side in (-1, 1):
-            painter.drawLine(QPointF(side * gap - 0.035 * s_eye, ey), QPointF(side * gap + 0.035 * s_eye, ey))
-        return
-    if state == "falando":
-        # Half-moon eyes, flat side down; they open a little more with the voice.
-        r = 0.045 * s_eye
-        lift = r * (0.75 + 0.35 * max(0.0, min(1.0, level)))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(col)
-        for side in (-1, 1):
-            half = QPainterPath()
-            half.moveTo(side * gap - r, ey + r * 0.4)
-            half.arcTo(QRectF(side * gap - r, ey + r * 0.4 - lift, 2 * r, 2 * lift), 180, -180)
-            half.closeSubpath()
-            painter.drawPath(half)
-        return
-
-    w, h, dx, dy, squint = 0.05 * s_eye, 0.10 * s_eye, 0.0, 0.0, 1.0
-    if state == "ouvindo":
-        w, h, dx = 0.058 * s_eye, 0.12 * s_eye, 0.025 * s
-    elif state in ("pensando", "pesquisando"):
-        side = -1 if state == "pensando" else 1
-        dx, dy, squint = side * 0.03 * s, -0.03 * s, 0.55
-    if state in ("idle", "pensando", "pesquisando") and (t % BLINK_EVERY) < BLINK_LEN:
-        h = 0.015 * s_eye
-
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(col)
-    squinting = -1 if state == "pensando" else 1
-    for side in (-1, 1):
-        eh = h * (squint if side == squinting else 1.0)
-        painter.drawEllipse(QRectF(side * gap + dx - w / 2, ey + dy - eh / 2, w, eh))
+    """A state's eyes, still (icons and pictures); `big` scales them."""
+    _eyes_from(painter, s, _targets(state), (0.0, 0.0), t, level, big, ey)
 
 
 def draw_shadow(painter: QPainter, center: QPointF, box: float, state: str, t: float, *,
-                level: float = 0.0, calm: bool = False, ring: QColor | None = None) -> None:
+                level: float = 0.0, calm: bool = False, ring: QColor | None = None,
+                look: tuple[float, float] | None = None) -> None:
     """Ombri in a `box` x `box` square at `center`. `level` (0..1) is the voice's
-    loudness while speaking; `ring` outlines the box (in game: click-through cue)."""
+    loudness while speaking; `ring` outlines the box (in game: click-through cue);
+    `look` (-1..1 each way) is where the cursor is, for the eyes to follow."""
     state = state if state in _POSE else "idle"
-    tilt, bright = _POSE[state]
     s = box * 0.9
     level = max(0.0, min(1.0, level))
+    mo = _motion("calm" if calm else "main")
+    m = mo.step(state, look, time.monotonic())
+    tilt, bright, talk, hair, bob_w, _spin, echo, gaze_w = m[:8]
+    bright += talk * (0.4 * level - 0.15)   # speaking: 0.6 + 0.4 * level
 
     painter.save()
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -206,29 +279,25 @@ def draw_shadow(painter: QPainter, center: QPointF, box: float, state: str, t: f
 
     if calm:
         # In game: only a dark disc with the neon rim. Its brightness says the
-        # state; while speaking it pulses with the voice. Nothing else moves.
-        if state == "falando":
-            bright = 0.6 + 0.4 * level
+        # state; while speaking it pulses with the voice; while listening,
+        # thinking or speaking the gradient circles the rim (_CALM_SPIN).
         painter.translate(cx, cy)
         disc = QPainterPath()
         disc.addEllipse(QPointF(0, 0), 0.36 * box, 0.36 * box)
-        brush = _rim_brush(s, -40.0)
+        brush = _rim_brush(s, mo.calm_angle)
         _glow(painter, disc, s, brush, bright)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(BODY))
         painter.drawPath(disc)
-        painter.setOpacity(0.35 + 0.65 * bright)
+        painter.setOpacity(max(0.0, min(1.0, 0.35 + 0.65 * bright)))
         painter.setPen(QPen(brush, max(1.5, 0.05 * box)))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPath(disc)
         painter.restore()
         return
 
-    bob = 0.0 if calm else (0.018 * s * math.sin(2 * math.pi * t / 3.2) if state == "idle" else 0.0)
-    hair = 0.3 if state == "pausado" else 1.0
-    if state == "falando":
-        bright = 0.6 + 0.4 * level
-    angle = -40.0 + (0.0 if calm or state not in ("pensando", "pesquisando") else (t * 40.0) % 360.0)
+    bob = bob_w * 0.018 * s * math.sin(2 * math.pi * t / 3.2)
+    tilt += mo.gaze[0] * gaze_w * 5.0
 
     painter.translate(cx, cy + bob)
     # Lean from the bottom of the head, so it tips rather than slides.
@@ -237,12 +306,12 @@ def draw_shadow(painter: QPainter, center: QPointF, box: float, state: str, t: f
     painter.translate(0, -(HEAD_CY + HEAD_RY) * s)
 
     path = _head(s, t, hair)
-    brush = _rim_brush(s, angle)
+    brush = _rim_brush(s, mo.angle)
 
-    if state == "pesquisando" and not calm:
+    if echo > 0.01:
         painter.save()
         painter.translate(-0.10 * s, 0.01 * s)
-        _glow(painter, path, s, brush, 0.35)
+        _glow(painter, path, s, brush, echo)
         painter.restore()
 
     _glow(painter, path, s, brush, bright)
@@ -250,13 +319,13 @@ def draw_shadow(painter: QPainter, center: QPointF, box: float, state: str, t: f
     painter.setBrush(QColor(BODY))
     painter.drawPath(path)
     rim = QPen(brush, max(1.0, 0.022 * s))
-    painter.setOpacity(0.35 + 0.65 * bright)
+    painter.setOpacity(max(0.0, min(1.0, 0.35 + 0.65 * bright)))
     painter.setPen(rim)
     painter.setBrush(Qt.BrushStyle.NoBrush)
     painter.drawPath(path)
     painter.setOpacity(1.0)
 
-    _eyes(painter, s, state, t, level, big=1.3, ey=EYE_Y)
+    _eyes_from(painter, s, m, (mo.gaze[0], mo.gaze[1]), t, level, 1.3, EYE_Y)
     painter.restore()
 
 
@@ -286,6 +355,36 @@ def shadow_image(size: int) -> QImage:
     _eyes(p, s, "ouvindo", 1.0, 0.0, big=2.0 if size <= 24 else 1.6, ey=EYE_Y)
     p.end()
     return img
+
+
+def disc_image(size: int) -> QImage:
+    """The in-game look as a still: a dark disc with the blue -> magenta -> coral
+    rim. The tray icon and the favicons (owner, 2026-11-19)."""
+    img = QImage(size, size, QImage.Format.Format_ARGB32_Premultiplied)
+    img.fill(Qt.GlobalColor.transparent)
+    p = QPainter(img)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    rim_w = max(1.6, 0.09 * size)
+    r = size / 2 - rim_w / 2 - (0.05 * size if size >= 32 else 0.3)
+    p.translate(size / 2, size / 2)
+    disc = QPainterPath()
+    disc.addEllipse(QPointF(0, 0), r, r)
+    brush = _rim_brush(size, -40.0)
+    if size >= 32:
+        _glow(p, disc, size * 0.5, brush, 0.8)
+    p.setPen(QPen(brush, rim_w))
+    p.setBrush(QColor(BODY))
+    p.drawPath(disc)
+    p.end()
+    return img
+
+
+def disc_icon() -> QIcon:
+    """The tray icon, every size drawn on its own."""
+    icon = QIcon()
+    for size in ICON_SIZES:
+        icon.addPixmap(QPixmap.fromImage(disc_image(size)))
+    return icon
 
 
 def shadow_icon() -> QIcon:

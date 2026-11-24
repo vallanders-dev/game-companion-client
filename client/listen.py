@@ -54,6 +54,46 @@ _CONFIRM_NOTES = ((659.25, 0.09), (987.77, 0.13))  # E5, then B5
 _CONFIRM_GAP = 0.02  # seconds of silence between the two notes
 
 
+# The voiced start cue (2026-11-22, Prime's test: "a yes in the voice instead of a
+# beep all the time"): the selected voice's baked "ack" line ("Oi?" / "Yes?" /
+# "¿Sí?"), as (float32 samples, sample rate). Set by main.py via set_start_cue()
+# whenever the voice changes; None = the 880 Hz beep, as before.
+_START_CUE = None
+
+
+def set_start_cue(pcm: bytes | None, rate: int) -> None:
+    """16-bit mono PCM of the voice's "ack" line, or None for the beep."""
+    global _START_CUE
+    if not pcm:
+        _START_CUE = None
+        return
+    try:
+        import numpy as np
+
+        samples = (np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0) * 0.9
+        _START_CUE = (samples, int(rate))
+    except Exception:  # noqa: BLE001 - no numpy: keep the beep
+        _START_CUE = None
+
+
+def _play_start_cue() -> float:
+    """Plays the start cue without blocking; returns how long it lasts, so the
+    recording loop can ignore those blocks (the mic would hear the "Yes?" on
+    speakers and count it as the player's speech)."""
+    cue = _START_CUE
+    if cue is None:
+        _play_tone(_START_TONE_HZ)
+        return 0.0
+    try:
+        import sounddevice as sd
+
+        sd.play(cue[0], cue[1])
+        return len(cue[0]) / cue[1]
+    except Exception:  # noqa: BLE001
+        _play_tone(_START_TONE_HZ)
+        return 0.0
+
+
 def _tone_wave(frequency: float, duration: float):
     """Build one faded sine-wave tone as float32 samples. Never plays it."""
     import numpy as np
@@ -378,8 +418,9 @@ def record_until_silence(
             # the background) so it never delays the recording loop below.
             # Same for both the ask-hotkey and remember-hotkey, since both
             # call this one function.
+            cue_left = 0.0
             if start_tone:
-                _play_tone(_START_TONE_HZ)
+                cue_left = _play_start_cue()
                 print("  🎙️ Escutando...")
             speech_time = 0.0
             hold_reason = ""
@@ -400,6 +441,12 @@ def record_until_silence(
                     return None
 
                 prob = vad_model(mono)
+                if cue_left > 0:
+                    # Ombri's own "Yes?" is still playing: the audio is kept (a player
+                    # who talks straight away keeps their first word) but it never
+                    # counts as speech, so on speakers the echo alone can't open a turn.
+                    cue_left -= _BLOCK_SECONDS
+                    prob = 0.0
 
                 if prob >= vad_threshold:
                     speech_time += _BLOCK_SECONDS

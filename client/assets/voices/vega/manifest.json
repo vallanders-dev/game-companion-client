@@ -15,5 +15,6 @@
   "already_running": "Ya estoy abierto en otra ventana. Cierra esa antes de abrirme de nuevo.",
   "sample": "¡Hola! Soy Ombri. Solo presiona F8 y pregúntame lo que quieras sobre tu juego.",
   "no_notes": "Ahora mismo no tengo una respuesta confiable para eso. Prueba preguntarlo de otra forma, o cuéntame la respuesta con F6 y la recuerdo para la próxima.",
-  "closing_ack": "¡Perfecto! Cualquier cosa, me llamas."
+  "closing_ack": "¡Perfecto! Cualquier cosa, me llamas.",
+  "ack": "¿Sí?"
 }

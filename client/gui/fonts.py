@@ -1,4 +1,10 @@
-"""gui/fonts.py — bundled Chakra Petch / Noto Sans, loaded via QFontDatabase.
+"""gui/fonts.py — the bundled app font, loaded via QFontDatabase.
+
+Since 2026-11-23 the whole app is Istok Web (owner: "a better font family across
+the app", a free Frutiger-style humanist sans; OFL, gui/assets/fonts/IstokWeb/
+OFL.txt, from google/fonts). It ships Regular and Bold only (+ italics): a
+semibold request renders as Bold. The earlier pair below stays bundled, one line
+away (HEADING_FAMILY / BODY_FAMILY):
 
 Both are Google Fonts under the OFL (see gui/assets/fonts/*/OFL.txt).
 Chakra Petch (headings) ships static weight files upstream. Noto Sans (body
@@ -26,6 +32,10 @@ from PySide6.QtGui import QFont, QFontDatabase
 _FONT_DIR = Path(__file__).parent / "assets" / "fonts"
 
 FONT_FILES = [
+    _FONT_DIR / "IstokWeb" / "IstokWeb-Regular.ttf",
+    _FONT_DIR / "IstokWeb" / "IstokWeb-Bold.ttf",
+    _FONT_DIR / "IstokWeb" / "IstokWeb-Italic.ttf",
+    _FONT_DIR / "IstokWeb" / "IstokWeb-BoldItalic.ttf",
     _FONT_DIR / "ChakraPetch" / "ChakraPetch-SemiBold.ttf",
     _FONT_DIR / "ChakraPetch" / "ChakraPetch-Bold.ttf",
     _FONT_DIR / "NotoSans" / "NotoSans-Regular.ttf",
@@ -34,8 +44,8 @@ FONT_FILES = [
     _FONT_DIR / "NotoSans" / "NotoSans-Bold.ttf",
 ]
 
-HEADING_FAMILY = "Chakra Petch"
-BODY_FAMILY = "Noto Sans"
+HEADING_FAMILY = "Istok Web"  # was "Chakra Petch" up to 0.1.24
+BODY_FAMILY = "Istok Web"  # was "Noto Sans" up to 0.1.24
 FALLBACK_FAMILY = "Segoe UI"
 
 _loaded = False
@@ -59,7 +69,7 @@ def ensure_fonts_loaded() -> bool:
 
 
 def heading_font(weight: QFont.Weight, size: float, tracking_percent: int | None = None) -> QFont:
-    """Chakra Petch (state labels, section captions, uppercase text)."""
+    """HEADING_FAMILY (state labels, section captions, uppercase text)."""
     family = HEADING_FAMILY if _load_ok else FALLBACK_FAMILY
     font = QFont(family)
     font.setPointSizeF(size)
@@ -70,7 +80,7 @@ def heading_font(weight: QFont.Weight, size: float, tracking_percent: int | None
 
 
 def body_font(weight: QFont.Weight, size: float, italic: bool = False) -> QFont:
-    """Noto Sans (body text, labels, buttons)."""
+    """BODY_FAMILY (body text, labels, buttons)."""
     family = BODY_FAMILY if _load_ok else FALLBACK_FAMILY
     font = QFont(family)
     font.setPointSizeF(size)

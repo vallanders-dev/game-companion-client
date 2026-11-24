@@ -37,6 +37,11 @@ FILLER_LINES = {
 # as the server says it's searching, "web_search_still" only if the answer
 # still hasn't started WEB_SEARCH_STILL_AFTER seconds later.
 WEB_SEARCH_STILL_AFTER = 6.0
+# A waiting line (filler or "let me look that up") plays at most once in this
+# many seconds; the rest of the time the orb's thinking ring is the only cue.
+# Prime's test (2026-11-22): "Checking..." before nearly every answer felt
+# like a tic. "web_search_still" (a wait past 6 s) is exempt: that one is news.
+WAIT_LINE_COOLDOWN = 60.0
 
 TEXTS: dict[str, dict[str, str]] = {
     "pt": {
@@ -49,6 +54,7 @@ TEXTS: dict[str, dict[str, str]] = {
         # until a game is detected (owner, 2026-11-03).
         "game_none": "Beleza, sem jogo então. Não pergunto mais.",
         "note_saved": "Anotado.",
+        "ack": "Oi?",
         # Spoken once per detected game when the game runs as administrator
         # and the client doesn't - Windows then hides every key press.
         "game_needs_admin": "Atenção: o jogo está rodando como administrador, então o Windows não me deixa "
@@ -70,6 +76,7 @@ TEXTS: dict[str, dict[str, str]] = {
         "game_unresolved": "I couldn't identify the game by voice. Press F8 or F6 to try again.",
         "game_none": "Got it, no game then. I won't ask again.",
         "note_saved": "Noted.",
+        "ack": "Yes?",
         "game_needs_admin": "Heads up: your game is running as administrator, so Windows won't let me hear "
                             "your keys. Close Ombri and open it again by right-clicking the icon and "
                             "choosing Run as administrator.",
@@ -90,6 +97,7 @@ TEXTS: dict[str, dict[str, str]] = {
         "game_unresolved": "No pude identificar el juego por voz. Presiona F8 o F6 para intentarlo de nuevo.",
         "game_none": "Perfecto, sin juego entonces. No pregunto más.",
         "note_saved": "Anotado.",
+        "ack": "¿Sí?",
         "game_needs_admin": "Atención: el juego está corriendo como administrador, así que Windows no me deja "
                             "oír las teclas. Cierra Ombri y ábrelo de nuevo con el botón derecho en el ícono, en "
                             "Ejecutar como administrador.",

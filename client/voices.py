@@ -33,6 +33,8 @@ VOICES: tuple[Voice, ...] = (
           "Spica (animada, americana)"),
     Voice("adam", "en", "Altair", "Altair (firme, britânico) · a voz do Ombri", "Altair (steady, British) · Ombri's voice",
           "Altair (firme, británico) · la voz de Ombri"),
+    Voice("coffee", "en", "Coffee", "Coffee (descontraído, britânico)", "Coffee (relaxed, British)",
+          "Coffee (relajado, británico)"),
     # ElevenLabs professional voices: Vega es-AR, Sirio and Antares es-ES (the
     # owner, 2026-11-05: a less common accent gives Ombri personality). What
     # Ombri says is the neutral "tú" of server/languages.py.

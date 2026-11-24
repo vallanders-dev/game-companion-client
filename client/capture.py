@@ -262,48 +262,65 @@ def read_new_hotkey() -> str:
 # HOOK_GRACE_SECONDS, the press still counts (that much late) and from then on
 # the poller fires at once, until the hook reports a press again. Either
 # source firing within DEDUPE_SECONDS of the other is the same press.
-HOOK_GRACE_SECONDS = 0.25
+#
+# Poll first (2026-11-20, anti-cheat): that self-heal is gone. When the key
+# can be polled - every key on Windows except odd names - there is NO hook at
+# all, so there is no hook to lose either; the `keyboard` hook is only the
+# fallback for a key the poller can't name, and for non-Windows. See
+# gui/global_keys.py for why a global keyboard hook is what anti-cheat flags.
 DEDUPE_SECONDS = 0.4
 POLL_SECONDS = 0.02
 
 
 def _default_poller(key: str):
-    try:
-        from client.gui.global_keys import VK_CODES, AsyncKeyPoller
-    except Exception:  # noqa: BLE001
+    if sys.platform != "win32":
         return None
-    if sys.platform != "win32" or key not in VK_CODES:
-        return None  # combos ("ctrl+shift+f8") stay hook-only
-    return AsyncKeyPoller(key)
+    try:
+        from client.gui.global_keys import AsyncKeyPoller
+
+        return AsyncKeyPoller(key)
+    except Exception:  # noqa: BLE001 - ValueError (a name it can't poll) or an import problem
+        return None
 
 
 class HotkeyManager:
     """Owns the currently-registered global hotkey and its 'pressed' flag.
 
-    Degrades gracefully when ``keyboard`` is unavailable: ``available`` is False,
-    ``pressed()`` is always False, and only manual scene entry works.
+    ``mode`` is "poll" (GetAsyncKeyState, no hook), "hook" (the `keyboard`
+    library, only for a key the poller can't name) or "" (neither works:
+    ``available`` is False, ``pressed()`` is always False, and only manual
+    scene entry works).
     """
 
     def __init__(self, hotkey: str, poller_factory: Callable | None = None) -> None:
-        self._kb = _keyboard()
-        self.available = self._kb is not None
+        self._kb = None
         self._event = threading.Event()
         self._handle = None
+        self._poller = None
         self._hotkey = normalize_hotkey(hotkey)
         self._lock = threading.Lock()
-        self._last_fire = float("-inf")  # when the last accepted press happened, any source
-        self._last_hook = float("-inf")
-        self.hook_lost = False
+        self._last_fire = float("-inf")  # when the last accepted press happened
         self._poller_factory = poller_factory or _default_poller
         self._stop = threading.Event()
-        if self._kb is not None:
-            try:
-                self._handle = self._kb.add_hotkey(self._hotkey, self._on_hook)
-            except Exception as exc:  # noqa: BLE001
-                print(f"  (não consegui registrar o hotkey '{self._hotkey}': {exc})")
         self._watching = False
-        if self._handle is not None:
+        self._poller = self._poller_factory(self._hotkey)
+        if self._poller is None:
+            self._kb = _keyboard()
+            if self._kb is not None:
+                try:
+                    self._handle = self._kb.add_hotkey(self._hotkey, self._on_hook)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"  (não consegui registrar o hotkey '{self._hotkey}': {exc})")
+        if self._poller is not None or self._handle is not None:
             self._start_watch()
+
+    @property
+    def available(self) -> bool:
+        return self._poller is not None or self._handle is not None
+
+    @property
+    def mode(self) -> str:
+        return "poll" if self._poller is not None else ("hook" if self._handle is not None else "")
 
     def _start_watch(self) -> None:
         if not self._watching:
@@ -319,31 +336,17 @@ class HotkeyManager:
 
     def _on_hook(self) -> None:
         with self._lock:
-            now = self._last_hook = time.monotonic()
-            if self.hook_lost:
-                self.hook_lost = False
-                print(f"  (teclado: o atalho {self._hotkey} voltou a responder normalmente)", flush=True)
-            self._accept(now)
+            self._accept(time.monotonic())
 
     def _watch(self) -> None:
-        key, poller = None, None
+        """Poll mode: the only press source. Hook mode: nothing to poll (the
+        poller couldn't name this key), so it just idles until a rebind."""
         while not self._stop.wait(POLL_SECONDS):
-            if key != self._hotkey:  # first run, or after try_rebind()
-                key = self._hotkey
-                poller = self._poller_factory(key)
-            if poller is None or not poller.pressed():
-                continue
-            edge = time.monotonic()
-            if not self.hook_lost:
-                self._stop.wait(HOOK_GRACE_SECONDS)
+            poller = self._poller
+            if poller is not None and poller.pressed():
                 with self._lock:
-                    if self._last_hook >= edge - HOOK_GRACE_SECONDS:
-                        continue  # the hook saw it: all good
-                    self.hook_lost = True
-                print(f"  (teclado: o atalho {self._hotkey} parou de chegar pelo hook; "
-                      "lendo a tecla direto)", flush=True)
-            with self._lock:
-                self._accept(edge)
+                    if poller is self._poller:  # not swapped by try_rebind() meanwhile
+                        self._accept(time.monotonic())
 
     def stop(self) -> None:
         self._stop.set()
@@ -364,19 +367,23 @@ class HotkeyManager:
         Returns ``(ok, error_message)``.
         """
         combo = normalize_hotkey(hotkey)
-        if self._kb is None:
-            return False, "a biblioteca 'keyboard' não está disponível"
-        try:
-            new_handle = self._kb.add_hotkey(combo, self._on_hook)
-        except Exception as exc:  # noqa: BLE001
-            return False, str(exc)
-        if self._handle is not None:
+        new_poller, new_handle = self._poller_factory(combo), None
+        if new_poller is None:
+            if self._kb is None:
+                self._kb = _keyboard()
+            if self._kb is None:
+                return False, "a biblioteca 'keyboard' não está disponível"
+            try:
+                new_handle = self._kb.add_hotkey(combo, self._on_hook)
+            except Exception as exc:  # noqa: BLE001
+                return False, str(exc)
+        if self._handle is not None and self._kb is not None:
             try:
                 self._kb.remove_hotkey(self._handle)
             except (KeyError, ValueError):
                 pass
-        self._handle = new_handle
-        self._hotkey = combo
+        with self._lock:
+            self._poller, self._handle, self._hotkey = new_poller, new_handle, combo
         self._start_watch()
         return True, ""
 
@@ -1114,6 +1121,27 @@ def _window_bounds(hwnd) -> dict | None:
     return {"left": left, "top": top, "width": width, "height": height}
 
 
+# Competitive shooters where the screen is never captured (docs/colonel_mode.md
+# rule 3; board 2026-11-20): their publishers forbid live help, and the frame
+# carries other players' names and chat. A closed list of exe stems, after
+# `_normalize_exe_stem()` (so VALORANT-Win64-Shipping.exe -> "valorant"), plus
+# the same names on the detected game itself, whichever pass found it. The
+# server drops these frames too (server/companion.py NO_SCREEN_GAMES).
+NO_CAPTURE_EXE_STEMS = frozenset({"overwatch", "valorant"})
+_NO_CAPTURE_NAME_RE = re.compile(r"\b(?:" + "|".join(sorted(NO_CAPTURE_EXE_STEMS)) + r")\b")
+
+
+def capture_blocked(game_name: str, exe_stem: str) -> bool:
+    """True when this game is one Ombri never takes a screenshot of."""
+    return exe_stem in NO_CAPTURE_EXE_STEMS or bool(_NO_CAPTURE_NAME_RE.search(game_name.lower()))
+
+
+class ScreenBlockedGame(RuntimeError):
+    """The game in front is on `NO_CAPTURE_EXE_STEMS`: no screenshot, by rule.
+    Its own class so the answer can say the true reason ("jogo_competitivo"),
+    not "the game wasn't in front"."""
+
+
 class NoForegroundGame(RuntimeError):
     """`capture_game_window_jpeg()` found no recognized game in front.
 
@@ -1182,10 +1210,28 @@ def capture_game_window_jpeg(aliases_path: Path, max_width: int = _MAX_WIDTH) ->
     isn't a recognized game, so the caller's existing try/except (every
     call site already treats a capture failure as "no scene, carry on")
     is the failure path - never a silent whole-monitor fallback."""
-    rect = get_foreground_game_window_rect(aliases_path)
+    match = _match_foreground_window(aliases_path)
+    if match is None:
+        raise NoForegroundGame("nenhum jogo reconhecido em primeiro plano — captura pulada")
+    hwnd, name = match
+    if capture_blocked(name, _foreground_exe_stem(hwnd)):
+        raise ScreenBlockedGame(f"{name}: jogo competitivo, a tela nunca é capturada")
+    rect = _window_bounds(hwnd)
     if rect is None:
         raise NoForegroundGame("nenhum jogo reconhecido em primeiro plano — captura pulada")
     return capture_screenshot_jpeg(max_width=max_width, region=rect)
+
+
+def _foreground_exe_stem(hwnd) -> str:
+    """The normalized exe stem of ``hwnd``'s process, "" when Windows won't say."""
+    try:
+        import win32process
+
+        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        path = _process_image_path(pid)
+        return _normalize_exe_stem(path.name) if path is not None else ""
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 # --------------------------------------------------------------------------- #

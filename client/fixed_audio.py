@@ -17,7 +17,19 @@ from client.listen import play_stop_tone
 from client.speech import AudioOut, read_pcm_wav
 
 
+# (name, Ombri voice) -> PCM in the player's own voice or None: set by client/main.py
+# to client.own_voice.cached_line (Avançado, 2026-11-23). Reads a file, never the network.
+LINE_OVERRIDE = None
+
+
 def load_line(name: str, voice: str = "raquel") -> bytes | None:
+    if LINE_OVERRIDE is not None:
+        try:
+            own = LINE_OVERRIDE(name, voice)
+        except Exception:  # noqa: BLE001 - the baked line always works
+            own = None
+        if own:
+            return own
     path = asset_path(name, voice)
     if not path.exists():
         return None
@@ -45,6 +57,39 @@ def play_line(name: str, voice: str = "raquel", *, fallback_tone: bool = True) -
         out.close(drain=False)
         return False
     out.close(drain=True)
+    return True
+
+
+_preview_lock = threading.Lock()
+_preview: tuple[AudioOut, threading.Event] | None = None
+
+
+def play_preview(name: str, voice: str) -> bool:
+    """The settings/token screens' "Listen" button: plays one baked line and
+    CUTS any sample still playing first - clicking Listen on two voices in a
+    row used to play both at once (Prime's test, 2026-11-22). Blocking; run
+    it on a worker thread."""
+    global _preview
+    pcm = load_line(name, voice)
+    if pcm is None:
+        return False
+    out, cancel = AudioOut(), threading.Event()
+    with _preview_lock:
+        if _preview is not None:
+            old_out, old_cancel = _preview
+            old_cancel.set()
+            old_out.close(drain=False)
+        _preview = (out, cancel)
+    try:
+        out.open()
+        out.write(pcm, cancel)
+    except Exception:  # noqa: BLE001 - no output device
+        out.close(drain=False)
+        return False
+    out.close(drain=not cancel.is_set())
+    with _preview_lock:
+        if _preview is not None and _preview[0] is out:
+            _preview = None
     return True
 
 
@@ -84,6 +129,14 @@ class FillerPlayer:
         return play_before_answer(out, cancel, self._fillers[idx], self._delay)
 
 
+_last_wait_line = 0.0  # time.monotonic() of the last waiting line actually played
+
+
+def wait_line_allowed(cooldown_s: float) -> bool:
+    """False while a waiting line played less than ``cooldown_s`` ago."""
+    return _last_wait_line == 0.0 or time.monotonic() - _last_wait_line >= cooldown_s
+
+
 def play_before_answer(out: AudioOut, cancel: threading.Event, pcm: bytes, delay_s: float) -> threading.Timer:
     """Plays `pcm` after `delay_s` unless the answer has started by then -
     the filler rule, shared by the fillers and the web-search lines. The
@@ -111,6 +164,8 @@ def play_before_answer(out: AudioOut, cancel: threading.Event, pcm: bytes, delay
                     out.filler_done.clear()
                     break
             time.sleep(0.05)
+        global _last_wait_line
+        _last_wait_line = time.monotonic()
         try:
             out.write(pcm, cancel)
         finally:

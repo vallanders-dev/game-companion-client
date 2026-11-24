@@ -24,6 +24,9 @@ import struct
 import threading
 
 
+TEXT_MAX = 500  # characters of a typed question or reply (server/session.py TEXT_MAX)
+
+
 def _app_version() -> str:
     """This app's version, sent on connect so the server knows which
     testers still run an old updater (client/VERSION)."""
@@ -306,6 +309,25 @@ class ServerSession:
         games = self._rest("GET", "/v1/games").get("games", [])
         return [g for g in games if isinstance(g, str) and g.strip()]
 
+    # -- the Build pane (server/build_guide.py, 2026-11-22): click-opens ------
+    def list_build_guides(self, game: str = "", language: str = "pt") -> list[dict]:
+        """The hand-made builds for `game` (`GET /v1/build_guides`): summaries
+        {id, name, layers, size}. The pane's own list, for a click instead of
+        "quero construir uma casa"."""
+        from urllib.parse import urlencode
+
+        query = urlencode({"game": game or "", "language": language or "pt"})
+        builds = self._rest("GET", f"/v1/build_guides?{query}").get("builds", [])
+        return [b for b in builds if isinstance(b, dict) and b.get("id")]
+
+    def get_build_guide(self, guide_id: str, language: str = "pt") -> dict:
+        """One build, whole (`GET /v1/build_guides/{id}`): the same body the
+        `guide` message carries on `open` (build, materials_by_layer, hints)."""
+        from urllib.parse import quote, urlencode
+
+        query = urlencode({"language": language or "pt"})
+        return self._rest("GET", f"/v1/build_guides/{quote(str(guide_id), safe='')}?{query}")
+
     def list_notes(self) -> list[dict]:
         """This tester's own notes, newest first (`GET /v1/notes`)."""
         notes = self._rest("GET", "/v1/notes").get("notes", [])
@@ -437,6 +459,7 @@ class ServerSession:
         on_state=None,
         on_meta=None,
         on_text=None,
+        on_cards=None,
         on_audio=None,
         on_usage=None,
         wake: bool = False,
@@ -447,6 +470,9 @@ class ServerSession:
         play_history: dict | None = None,
         only_if_report: bool = False,
         play_history_unasked: bool = False,
+        guide: dict | None = None,
+        on_guide=None,
+        text_only: bool = False,
     ) -> dict:
         """One ask-turn, start to finish - blocks until `turn_result`
         arrives (or the connection breaks). `wav_bytes` is the real path
@@ -473,6 +499,11 @@ class ServerSession:
         remember() does (on the "ouvindo" state). `follow_up`: the audio came
         from the follow-up window (no key pressed) - the server drops speech
         that isn't meant for Ombri.
+        `guide` (2026-11-22, the Build pane; server/build_guide.py): what the
+        pane shows - {"id", "layer"} with a build open, {"list": True} while it
+        lists the builds, {} when closed - sent only when the server advertises
+        "build_guide"; `on_guide(body)` gets the server's `guide` message (the
+        pane's next state) when a command landed.
         """
         msg: dict = {
             "type": "turn_start", "turn_id": turn_id, "kind": "ask", "game": game,
@@ -481,6 +512,10 @@ class ServerSession:
         }
         if question_text is not None:
             msg["question_text"] = question_text
+        if text_only:
+            # typed in the PC chat: answered in text, nothing spoken (only when
+            # the server advertises "text_only"; docs/chat_redesign.md)
+            msg["text_only"] = True
         if allow_spoilers is not None:
             msg["allow_spoilers"] = allow_spoilers
         if wake:
@@ -491,6 +526,8 @@ class ServerSession:
             msg["can_confirm"] = True
         if follow_up:
             msg["follow_up"] = True
+        if on_cards is not None:
+            msg["shows_cards"] = True  # the server runs its cards search only for an app that shows them
         if no_screen_reason and screenshot_bytes is None:
             # why this question has no picture, so the answer can say it out loud
             # ("fora_do_jogo" = the game was not in the foreground; see
@@ -504,6 +541,8 @@ class ServerSession:
             msg["play_history"] = play_history  # for the morning report; see client/play_history.py
         if play_history_unasked:
             msg["play_history_unasked"] = True  # a morning report asks first
+        if guide is not None and self.supports("build_guide"):
+            msg["guide"] = guide  # the Build pane's state; the server stays stateless about it
         frames: list = [json.dumps(msg)]
         if screenshot_bytes is not None:
             frames.append(screenshot_bytes)
@@ -511,10 +550,11 @@ class ServerSession:
             frames.append(wav_bytes)
         self._send_opening(frames)
 
-        return self._pump(turn_id, cancel, on_state, on_meta, on_text, on_audio, on_usage, record_reply)
+        return self._pump(turn_id, cancel, on_state, on_meta, on_text, on_audio, on_usage, record_reply,
+                          on_cards=on_cards, on_guide=on_guide)
 
     def _pump(self, turn_id: str, cancel, on_state, on_meta, on_text, on_audio, on_usage,
-              record_reply=None) -> dict:
+              record_reply=None, on_cards=None, on_guide=None) -> dict:
         cancel_sent = False
         while True:
             if cancel is not None and cancel.is_set() and not cancel_sent:
@@ -545,22 +585,19 @@ class ServerSession:
                 if data["state"] == "ouvindo" and record_reply is not None:
                     # F8 pressed for a note: the server's "save it?" has been
                     # spoken - record the yes/no and send it (see remember()).
-                    reply_wav = record_reply()
-                    try:
-                        self._ws.send(json.dumps({
-                            "type": "turn_continue", "turn_id": turn_id, "has_audio": bool(reply_wav),
-                        }))
-                        if reply_wav:
-                            self._ws.send(reply_wav)
-                    except Exception as exc:  # noqa: BLE001
-                        self.close()
-                        raise ServerError(f"conexão caiu durante o turno: {exc}") from exc
+                    self._send_reply(turn_id, record_reply())
             elif mtype == "turn_meta" and on_meta is not None:
                 on_meta(data["question"], data["scene"])
             elif mtype == "turn_text" and on_text is not None:
                 on_text(data["text"])
+            elif mtype == "turn_cards" and on_cards is not None:
+                # links under the answer (server/cards.py), for the Chat view
+                on_cards(data.get("cards") if isinstance(data.get("cards"), list) else [])
             elif mtype == "usage_update" and on_usage is not None:
                 on_usage(data["count"], data["cap"])
+            elif mtype == "guide" and on_guide is not None:
+                # the Build pane's next state (server/build_guide.py), before the spoken line
+                on_guide({k: v for k, v in data.items() if k != "type"})
             elif mtype == "turn_result":
                 return data
             # anything else (a stray note_prompt/stt_result meant for a
@@ -581,6 +618,9 @@ class ServerSession:
         on_state=None,
         on_audio=None,
         on_usage=None,
+        note_text: str | None = None,
+        text_only: bool = True,
+        on_text=None,
     ) -> dict:
         """The F6 flow: send the dictated note, then answer the server's
         confirm-ask (and, once, its re-ask) by RECORDING a fresh reply each
@@ -605,13 +645,22 @@ class ServerSession:
         }
         if live_id:
             msg["live_id"] = live_id
+        if note_text is not None:
+            # the note in words, no audio (needs "text_only" in auth_ok.features):
+            # typed in the chat, or heard by the player's own ears
+            msg["question_text"] = note_text[:TEXT_MAX]
+        if text_only:
+            # nothing spoken by the server: the "save it?" comes as `turn_text`
+            # (`on_text`) - shown above the chat's buttons, or read by the
+            # player's own voice; the yes/no is typed (str) or recorded as usual
+            msg["text_only"] = True
         frames: list = [json.dumps(msg)]
         if screenshot_bytes is not None:
             frames.append(screenshot_bytes)
         if note_wav is not None:
             frames.append(note_wav)
         self._send_opening(frames)
-        return self._confirm_rounds(turn_id, record_reply, cancel, on_state, on_audio, on_usage)
+        return self._confirm_rounds(turn_id, record_reply, cancel, on_state, on_audio, on_usage, on_text)
 
     @_exclusive
     def recap(
@@ -640,7 +689,25 @@ class ServerSession:
         self._send_opening([json.dumps(msg)])
         return self._confirm_rounds(turn_id, record_reply, cancel, on_state, on_audio, on_usage)
 
-    def _confirm_rounds(self, turn_id: str, record_reply, cancel, on_state, on_audio, on_usage) -> dict:
+    def _send_reply(self, turn_id: str, reply) -> None:
+        """A confirm round's answer: WAV bytes (spoken), a str (typed in the chat:
+        "reply_text", needs "text_only" in auth_ok.features) or None (nothing heard)."""
+        msg: dict = {"type": "turn_continue", "turn_id": turn_id}
+        if isinstance(reply, str):
+            msg.update(has_audio=False, reply_text=reply[:TEXT_MAX])
+            reply = None
+        else:
+            msg["has_audio"] = bool(reply)
+        try:
+            self._ws.send(json.dumps(msg))
+            if reply:
+                self._ws.send(reply)
+        except Exception as exc:  # noqa: BLE001
+            self.close()
+            raise ServerError(f"conexão caiu durante o turno: {exc}") from exc
+
+    def _confirm_rounds(self, turn_id: str, record_reply, cancel, on_state, on_audio, on_usage,
+                        on_text=None) -> dict:
         """The multi-round half shared by `remember()` and `recap()`: play
         what the server sends, record a reply at each `ouvindo`, return the
         `turn_result`."""
@@ -672,18 +739,11 @@ class ServerSession:
                 if on_state is not None:
                     on_state(data["state"])
                 if data["state"] == "ouvindo":
-                    reply_wav = record_reply()
-                    try:
-                        self._ws.send(json.dumps({
-                            "type": "turn_continue", "turn_id": turn_id, "has_audio": bool(reply_wav),
-                        }))
-                        if reply_wav:
-                            self._ws.send(reply_wav)
-                    except Exception as exc:  # noqa: BLE001
-                        self.close()
-                        raise ServerError(f"conexão caiu durante o turno: {exc}") from exc
+                    self._send_reply(turn_id, record_reply())
             elif mtype == "usage_update" and on_usage is not None:
                 on_usage(data["count"], data["cap"])
+            elif mtype == "turn_text" and on_text is not None:
+                on_text(str(data.get("text") or ""))
             elif mtype == "turn_result":
                 return data
             # "note_prompt" itself carries no actionable info beyond what
