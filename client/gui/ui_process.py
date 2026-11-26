@@ -37,6 +37,10 @@ stdin, JSON lines from the client:
   {"type": "chat_stage", "stage": "screen"}      # the client took a screenshot for this turn
   {"type": "chat_done", "outcome": str}          # the turn ended ("failed" when the connection dropped)
   {"type": "chat_confirm", "text": str}          # a typed note: show "Sim, guardar" / "Não"
+  {"type": "guide", "action": ...}               # the Build pane (window AND the in-game pane, one state)
+  {"type": "visual", "action": "open|index|pin|unpin|back|show|close", "items"?, "index"?, "query"?, "style"?}
+                                                 # pictures in the in-game pane (client/gui/game_pane.py, 2026-11-24)
+  {"type": "pane", "action": "back|show|close"}  # the in-game pane itself, whatever it shows
 The chat's questions and answers live in memory only. The cards' links (url,
 title, site, kind, game, time - never the question) are kept on this PC by
 client/links_store.py for the Links tab (owner decision, 2026-11-23).
@@ -44,7 +48,9 @@ stdout, JSON lines back to the client (the ONLY thing written there - every
 diagnostic print goes to stderr, i.e. output/overlay.log):
   {"cmd": "quit" | "pause" | "resume" | "relaunch_admin" | "survey_open" | "survey_later"
           | "notes_list" | "notes_delete:<id>" | "recap_save:<id>" | "game_set:<name>" | "games_list"
-          | "chat_send:{text, remember}" | "chat_mic" | "chat_confirm:yes|no"}
+          | "chat_send:{text, remember}" | "chat_mic" | "chat_confirm:yes|no"
+          | "guide_state:<id>:<layer>[:list]" | "guide_open:<id>" | "guide_list:<game>"
+          | "pane_state:<json>" | "pane_hidden:fullscreen"}
 ("settings" is no longer sent: since 2026-11-21 the settings are a panel of
 the main window; main.py still answers it for an older UI build.)
 Exits on stdin EOF, i.e. whenever the client exits.
@@ -57,6 +63,7 @@ import signal
 import sys
 import threading
 import time
+from pathlib import Path
 
 from PySide6.QtCore import QObject, QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QIcon, QPixmap
@@ -71,6 +78,8 @@ from client.gui.widgets import ACCENT, BG, CARD, CONTROL, TEXT_3
 from client.gui import indicator
 from client.gui.orb import claim_taskbar_identity, sphere_image
 from client.gui.overlay import DARK_THEME, HudState, OverlayWindow
+from client.gui.game_pane import GamePane
+from client.gui import pane_store
 from client.gui.ui_texts import ui
 from client import links_store
 
@@ -368,11 +377,18 @@ class TrayHeader(QWidget):
 
 
 class Ui:
-    def __init__(self, app: QApplication, start_in_tray: bool = False) -> None:
+    def __init__(self, app: QApplication, start_in_tray: bool = False, store_dir: Path | None = None) -> None:
         self.app = app
         self.start_in_tray = start_in_tray
-        self.window = MainWindow()
-        self.overlay = OverlayWindow(theme=DARK_THEME)
+        # `store_dir` is the pane's folder (pane.json, pin.*, hints.json) - a test gives a
+        # scratch one; the window's hints count into the same hints.json as the pane's.
+        self.window = MainWindow(store_dir=store_dir)
+        # The in-game orb comes back where the player left it (client/gui/pane_store.py).
+        saved_orb = pane_store.load_layout(store_dir / pane_store.LAYOUT_NAME if store_dir else None)["orb"]
+        self.overlay = OverlayWindow(theme=DARK_THEME, position=tuple(saved_orb) if saved_orb else None)
+        # The in-game pane (client/gui/game_pane.py): grows out of the orb; the
+        # guide it shows is the window's Build pane's (GuideMorph keeps it).
+        self.pane = GamePane(self.overlay, store_dir=store_dir)
         self.notice = Notice()
         self.picker = GamePicker()
         self.revealed = False
@@ -402,6 +418,18 @@ class Ui:
             lambda gid, layer, listing: _send(f"guide_state:{gid}:{layer}" + (":list" if listing else "")))
         self.window.guide_open_requested.connect(lambda gid: _send("guide_open:" + gid))
         self.window.guide_list_requested.connect(lambda: _send("guide_list:" + (self.window.game or "")))
+        # One state between the window's Build pane and the in-game pane: the
+        # window's GuideMorph keeps it, the in-game pane follows and asks.
+        self.window.guide_state_changed.connect(self.pane.follow_guide)
+        self.pane.guide_step.connect(self.window.guide.step)
+        self.pane.guide_close_requested.connect(lambda: self.window.guide.close_guide(False))
+        self.window.guide.finished.connect(self.pane.show_finished)  # the last layer done: the front shot stays up
+        self.pane.state_changed.connect(
+            lambda state: _send("pane_state:" + json.dumps(state, ensure_ascii=False, separators=(",", ":"))))
+        self.pane.visual_shown.connect(self._visual_shown)
+        self.pane.hidden_by_fullscreen.connect(lambda: _send("pane_hidden:fullscreen"))
+        self.overlay.click_through_changed.connect(self.pane.set_click_through)
+        self.overlay.clicked.connect(self.pane.orb_clicked)
 
         self.tray = QSystemTrayIcon(indicator.tray_icon())
         self.tray.setToolTip("Ombri")
@@ -452,6 +480,22 @@ class Ui:
         self._links_path = path
         self.window.settings.advanced.links_path = path
 
+    @property
+    def pane_store_dir(self):
+        return self.pane.store_dir
+
+    @pane_store_dir.setter
+    def pane_store_dir(self, folder) -> None:
+        """The in-game pane's layout and pin files (a test gives a scratch folder)."""
+        self.pane.store_dir = folder
+
+    def _visual_shown(self, item: dict, image) -> None:
+        """A picture the in-game pane showed: a card in the chat (thumbnail +
+        source), and its source page in the Links tab when it has one."""
+        card = self.window.chat.add_visual(item, image)
+        if card.get("url"):
+            self.window.chat.set_links(links_store.add([card], self.window.game, self.links_path))
+
     def _texts(self) -> None:
         L = self.window.lang
         self.a_open.setText(ui(L, "tray_open"))
@@ -491,6 +535,7 @@ class Ui:
         hud = STATES.get(shown)
         if hud is not None:
             self.overlay.set_state(hud)
+        self.pane.set_state(shown)
 
     # ------------------------------------------------------------------ messages
     def handle(self, msg: dict) -> None:
@@ -515,6 +560,7 @@ class Ui:
             if name and not self.revealed:
                 self.revealed = True
                 self.overlay.show()
+                self.pane.restore_pinned()  # a pinned picture comes back with the game
             self._texts()
         elif kind == "usage":
             count, cap = int(msg.get("count", 0)), int(msg.get("cap", 0))
@@ -525,6 +571,7 @@ class Ui:
             self._texts()
         elif kind == "info":
             self.window.set_info(str(msg.get("lang", "pt")), str(msg.get("voice", "")), msg.get("keys") or {})
+            self.pane.set_language(self.window.lang, self.window.keys)
             self._texts()
         elif kind == "paused":
             self.paused = bool(msg.get("on"))
@@ -550,6 +597,13 @@ class Ui:
             self.window.chat_cards(cards)
             if cards:  # kept on this PC for the Links tab: links only, never the question
                 self.window.chat.set_links(links_store.add(cards, self.window.game, self.links_path))
+        elif kind == "recipe":
+            # the brewing strip (server/brewing.py): the card plus the icons main.py has
+            if isinstance(msg.get("card"), dict):
+                self.window.show_recipe(msg["card"], msg.get("icons") if isinstance(msg.get("icons"), dict) else None)
+        elif kind == "recipe_icons":
+            if isinstance(msg.get("icons"), dict):
+                self.window.recipe_icons(msg["icons"])
         elif kind == "chat_stage":
             self.window.chat.set_stage(str(msg.get("stage") or ""))
         elif kind == "chat_done":
@@ -560,7 +614,22 @@ class Ui:
             self.window.show_and_raise()
             self.window.open_chat(1 if msg.get("tab") == "links" else 0)
         elif kind == "guide":
+            self.pane.guide_message(msg)  # first: the build must be here before the keeper's state arrives
             self.window.guide_message(msg)
+        elif kind == "guide_assets":
+            # the build's real screenshots and block icons main.py fetched (client/build_assets.py)
+            self.window.guide.guide_assets(msg)
+            self.pane.guide_assets(msg)
+        elif kind == "visual":
+            self.pane.visual_message(msg)
+        elif kind == "pane":
+            action = str(msg.get("action") or "")
+            if action == "back":
+                self.pane.fold()
+            elif action == "show":
+                self.pane.unfold()
+            elif action == "close":
+                self.pane.close_pane()
         elif kind == "echo_cmd":
             # Test hook (eval/client_ui_harness.py): proves the command
             # channel end to end without a mouse. The client never sends it.

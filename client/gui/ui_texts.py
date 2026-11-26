@@ -139,6 +139,14 @@ UI = {
         "guide_list_error": "Não consegui buscar as construções: {error}",
         "guide_loading": "Carregando a construção…",
         "guide_list_hint": "Clique numa construção ou diga o nome dela com {ask}.",
+        # The in-game pane (client/gui/game_pane.py, 2026-11-24).
+        "pane_close": "Fechar", "pane_back": "Voltar pro Ombri (continua guardado)",
+        "pane_pin": "Fixar esta", "pane_unpin": "Soltar", "pane_pinned_caps": "FIXADA",
+        "pane_idea_caps": "IDEIA", "pane_step_caps": "PASSO {n} / {m}", "pane_of": "{n} de {m}",
+        "pane_source": "Abrir a página de origem", "pane_by": "por {author}",
+        "pane_prev": "Anterior", "pane_next": "Próxima", "pane_resize": "Arraste pra mudar o tamanho",
+        "pane_layer_short": "CAMADA {n} / {m}",
+        "pane_done_caps": "CONSTRUÇÃO PRONTA",
     },
     "en": {
         "beta": "beta",
@@ -269,6 +277,14 @@ UI = {
         "guide_list_error": "Couldn't fetch the builds: {error}",
         "guide_loading": "Loading the build…",
         "guide_list_hint": "Click a build or say its name with {ask}.",
+        # The in-game pane (client/gui/game_pane.py, 2026-11-24).
+        "pane_close": "Close", "pane_back": "Back to the orb (kept for later)",
+        "pane_pin": "Pin this one", "pane_unpin": "Unpin", "pane_pinned_caps": "PINNED",
+        "pane_idea_caps": "IDEA", "pane_step_caps": "STEP {n} / {m}", "pane_of": "{n} of {m}",
+        "pane_source": "Open the source page", "pane_by": "by {author}",
+        "pane_prev": "Previous", "pane_next": "Next", "pane_resize": "Drag to resize",
+        "pane_layer_short": "LAYER {n} / {m}",
+        "pane_done_caps": "BUILD COMPLETE",
     },
     # Spanish: neutral Latin American "tú" (docs/spanish.md §5).
     "es": {
@@ -401,6 +417,14 @@ UI = {
         "guide_list_error": "No pude traer las construcciones: {error}",
         "guide_loading": "Cargando la construcción…",
         "guide_list_hint": "Haz clic en una construcción o di su nombre con {ask}.",
+        # The in-game pane (client/gui/game_pane.py, 2026-11-24).
+        "pane_close": "Cerrar", "pane_back": "Volver a Ombri (queda guardado)",
+        "pane_pin": "Fijar esta", "pane_unpin": "Soltar", "pane_pinned_caps": "FIJADA",
+        "pane_idea_caps": "IDEA", "pane_step_caps": "PASO {n} / {m}", "pane_of": "{n} de {m}",
+        "pane_source": "Abrir la página de origen", "pane_by": "por {author}",
+        "pane_prev": "Anterior", "pane_next": "Siguiente", "pane_resize": "Arrastra para cambiar el tamaño",
+        "pane_layer_short": "CAPA {n} / {m}",
+        "pane_done_caps": "CONSTRUCCIÓN LISTA",
     },
 }
 

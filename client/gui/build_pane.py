@@ -35,6 +35,23 @@ sent in the `guide` message - client/ is public, the builds are not), the
 layer, whether the list is showing. Every change is reported upward
 (`state_changed`) so main.py's next `turn_start.guide` says where the pane
 is. Nothing is written anywhere.
+
+2026-11-24 (the in-game pane, client/gui/game_pane.py): the morph's timing
+is the module functions `morph_progress()`, `content_opacity()` and
+`face_opacity()`, shared by `GuideMorph` here and the pane over the game, so
+both move exactly alike.
+
+2026-11-24 (PR 3b, the real screenshots): every step shows the owner's own
+game screenshot of the build up to that layer (`_Shot`, above the grid), and
+the chips carry the block's icon (crops of the owner's inventory). Both come
+from the server only (server/build_shots.py): the `guide` message brings the
+step's `shot` when a voice command moves the pane; main.py fetches the rest
+after an `open` and sends them as `guide_assets` messages; `ASSETS` keeps
+them here for the run, shared with the in-game pane. A step without its
+picture (a new build before its shots exist, an old server) shows the grid
+alone, as before; a block without its icon shows its colour square. When
+the last layer is done, `finished` carries the build so the in-game pane
+can show the finished house (its front shot).
 """
 from __future__ import annotations
 
@@ -43,13 +60,16 @@ import os
 import sys
 import time
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QCursor, QImage, QLinearGradient, QPainter, QPainterPath, QPen
+import base64
+
+from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QBrush, QColor, QCursor, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QPushButton, QScrollArea, QSizePolicy, QStackedWidget,
     QToolTip, QVBoxLayout, QWidget,
 )
 
+from client.build_assets import block_id, valid_shot
 from client.gui import indicator
 from client.gui.fonts import HEADING_FAMILY
 from client.gui.shadow import BLUE, BODY, CORAL, HEAD_CY, HEAD_RX, MAGENTA
@@ -249,9 +269,111 @@ def paint_glass(p: QPainter, path: QPainterPath, bright: float, fill: QColor, op
 
 
 # --------------------------------------------------------------------------- #
+# The morph's timing (shared with client/gui/game_pane.py)
+# --------------------------------------------------------------------------- #
+def morph_progress(phase: str, ms: float, reduced: bool = False) -> tuple[float, float, float, float]:
+    """(e, swell, wobble, opacity) of the glass `ms` into `phase`: e = 0 the
+    orb's ellipse (times `swell`), 1 the pane; a negative e is the breath at
+    the end of a close (the ellipse a little larger, settling). Reduced
+    motion: a plain fade, the pane's full shape from the first frame."""
+    if phase == "open":
+        return 1.0, 1.0, 0.0, 1.0
+    if phase == "closed":
+        return 0.0, 1.0, 0.0, 0.0
+    if reduced:
+        u = _clamp(ms / FADE_MS)
+        return 1.0, 1.0, 0.0, (u if phase == "opening" else 1.0 - u)
+    if phase == "opening":
+        # the drop forms (the head fills out, its edge starts to move), then stretches
+        form = _smooth(ms / 90)
+        e = _ease_out((ms - 90) / 470) if ms > 90 else 0.0
+        swell = 1.0 + 0.45 * form * (1.0 - e)
+        wobble = form * (1.0 - _smooth((ms - 380) / 180))
+        return e, swell, wobble, 1.0
+    # closing: the shape waits for the content to fade, pulls back, then one breath
+    v = _clamp((ms - 120) / 420)
+    e = 1.0 - _smooth(v)
+    if ms <= 540:
+        wobble = _smooth((ms - 120) / 120) * (1.0 - _smooth((ms - 460) / 80))
+        return e, 1.0 + 0.45 * (1.0 - e) * _smooth(v), wobble, 1.0
+    breath = math.sin(math.pi * _clamp((ms - 540) / 120))  # the drop settles: a small overshoot
+    return -0.06 * breath, 1.0, 0.0, 1.0
+
+
+def content_opacity(phase: str, ms: float, reduced: bool = False) -> float:
+    """The content inside the glass: fades in over the last 180 ms of an
+    open, out over the first 140 ms of a close (with the whole, reduced)."""
+    length = OPEN_MS if phase == "opening" else CLOSE_MS
+    if reduced:
+        u = _clamp(ms / FADE_MS)
+        return u if phase == "opening" else 1.0 - u
+    if phase == "opening":
+        return _smooth((ms - (length - 180)) / 180)
+    return 1.0 - _smooth(ms / 140)
+
+
+def face_opacity(phase: str, ms: float, reduced: bool = False) -> float:
+    """How much of Ombri's face still shows on the drop: 1 at the very start
+    of an open and the very end of a close, 0 in between."""
+    if reduced or phase not in ("opening", "closing"):
+        return 0.0
+    if phase == "opening":
+        return 1.0 - _smooth(ms / FACE_MS)
+    return _smooth((ms - (CLOSE_MS - FACE_MS)) / FACE_MS)
+
+
+# --------------------------------------------------------------------------- #
 # The layer grid
 # --------------------------------------------------------------------------- #
 _FALLBACK_COLORS = ("#8A919E", "#B8945F", "#6B4F2A", "#CFE8F3", "#9C7A45", "#7A8F6B", "#B0646A", "#6F7FB8")
+
+
+def merge_materials(materials: list) -> list[dict]:
+    """The step card's rows, one per block: a guide may list the same block
+    under two palette keys with different states (stairs upside down for
+    the trim, a top and a bottom slab) and the player buys "12 escadas",
+    not 7 and 5 - so rows with the same block id become one, their counts
+    added up (the server's build_guide.materials already does this; an
+    older server's rows, or a hand-made message, are merged here). A row
+    without a block id stays its own. The first row's place and colour."""
+    out: list[dict] = []
+    by_block: dict[str, dict] = {}
+    for m in materials or []:
+        if not isinstance(m, dict):
+            continue
+        bid = block_id(m.get("block")) if m.get("block") else ""
+        hit = by_block.get(bid) if bid else None
+        if hit is None:
+            row = dict(m)
+            row["chars"] = [str(c) for c in (m.get("chars") or [m.get("char")]) if c is not None]
+            out.append(row)
+            if bid:
+                by_block[bid] = row
+            continue
+        for key in ("layer", "total", "placed", "left"):
+            try:
+                hit[key] = int(hit.get(key) or 0) + int(m.get(key) or 0)
+            except (TypeError, ValueError):
+                pass
+        hit["chars"] += [str(c) for c in (m.get("chars") or [m.get("char")]) if c is not None and str(c) not in hit["chars"]]
+    return out
+
+
+def card_order(rows: list[dict]) -> list[dict]:
+    """The step card's order: the blocks this layer needs first, the one
+    with the most to place at the top, then the rest - the rows that say
+    "0 nesta camada", dimmed - in the server's order (the whole build's
+    total). The server keeps its order and the spoken lines; on a late
+    layer (the watchtower's 10th) the player would otherwise scroll past
+    four finished blocks to find the logs and lanterns. An older server's
+    rows without `layer` keep their order."""
+    def key(row: dict) -> tuple[int, int]:
+        try:
+            here = int(row.get("layer") or 0)
+        except (TypeError, ValueError):
+            here = 0
+        return (0, -here) if here > 0 else (1, 0)
+    return sorted(rows, key=key)  # a stable sort: ties keep the server's order
 
 
 def block_colors(palette: dict) -> dict[str, QColor]:
@@ -441,6 +563,205 @@ class LayerGrid(QWidget):
 # --------------------------------------------------------------------------- #
 # Chips, buttons, the ripple layer
 # --------------------------------------------------------------------------- #
+def _drawn_part(img: QImage) -> QImage:
+    """The icon without its transparent margin: the owner's crops are 60x60
+    with the block drawn as the inventory shows it - a slab in the lower
+    half, a ladder tall and narrow, a torch a few pixels wide. The chip
+    draws this part centred, at the size it fits, never stretched."""
+    img = img.convertToFormat(QImage.Format.Format_ARGB32)
+    w, h = img.width(), img.height()
+    if w < 1 or h < 1 or img.bytesPerLine() != w * 4:
+        return img
+    alpha = bytes(img.constBits())[3::4]  # one byte a pixel, rows end to end
+    rows = [y for y in range(h) if max(alpha[y * w:(y + 1) * w]) > 16]
+    cols = [x for x in range(w) if max(alpha[x::w]) > 16]
+    if not rows or not cols:
+        return img
+    return img.copy(cols[0], rows[0], cols[-1] - cols[0] + 1, rows[-1] - rows[0] + 1)
+
+
+def fit_icon(icon: QPixmap, side: int, ratio: float = 1.0) -> QPixmap:
+    """`icon` (its drawn part) on a transparent `side` x `side` square, as
+    large as it fits with its own proportions, centred - a cube fills the
+    square, a slab is a wide bar across its middle, a torch a thin stick.
+    Drawn at `ratio` pixels a point so a HiDPI screen gets a sharp one."""
+    ratio = max(1.0, float(ratio or 1.0))
+    px = max(1, int(round(side * ratio)))
+    out = QPixmap(px, px)
+    out.fill(Qt.GlobalColor.transparent)
+    if not icon.isNull():
+        scaled = icon.scaled(px, px, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        p = QPainter(out)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        p.drawPixmap((px - scaled.width()) // 2, (px - scaled.height()) // 2, scaled)
+        p.end()
+    out.setDevicePixelRatio(ratio)
+    return out
+
+
+class _Assets:
+    """The Build pane's pictures for the run (client/build_assets.py keeps the
+    bytes in main.py; here they are decoded as needed): `icons` block id ->
+    QPixmap, `shots` (guide id, name) -> JPEG bytes, decoded into a few
+    QImages at a time (a 1280 px picture is ~3.4 MB decoded; the bytes are
+    ~120 KB). Shared by the window's pane and the in-game pane. A picture
+    that doesn't decode is dropped."""
+
+    ICON_PX = 22
+    MAX_SHOTS = 128     # bytes kept: a few builds of 5-12 layers plus their angles, ~16 MB at most
+    MAX_DECODED = 6     # QImages kept: the step on screen and its neighbours
+
+    def __init__(self) -> None:
+        self.icons: dict[str, QPixmap] = {}
+        self.shots: dict[tuple[str, str], bytes] = {}
+        self._decoded: dict[tuple[str, str], QImage] = {}
+
+    @staticmethod
+    def _bytes(data) -> bytes | None:
+        if isinstance(data, str):
+            try:
+                return base64.b64decode(data, validate=True)
+            except (ValueError, TypeError):
+                return None
+        return bytes(data) if isinstance(data, (bytes, bytearray)) else None
+
+    def put_icons(self, icons: dict) -> list[str]:
+        """{block id: base64 PNG} -> the ids that are new here (for a refresh)."""
+        done: list[str] = []
+        for bid, data in (icons or {}).items():
+            if not isinstance(bid, str) or block_id(bid) != bid or bid in self.icons:
+                continue
+            raw = self._bytes(data)
+            if not raw:
+                continue
+            img = QImage.fromData(raw)
+            if img.isNull():
+                continue
+            self.icons[bid] = QPixmap.fromImage(_drawn_part(img))
+            done.append(bid)
+        return done
+
+    def put_shots(self, guide_id: str, shots: dict) -> list[str]:
+        """{name: base64 JPEG} of one build -> the names that are new here."""
+        done: list[str] = []
+        if not guide_id:
+            return done
+        for name, data in (shots or {}).items():
+            if not isinstance(name, str) or not valid_shot(guide_id, name) or (guide_id, name) in self.shots:
+                continue
+            raw = self._bytes(data)
+            if not raw or QImage.fromData(raw).isNull():
+                continue
+            if len(self.shots) >= self.MAX_SHOTS:  # the other builds' shots go first; this build keeps its own
+                for key in [k for k in self.shots if k[0] != guide_id]:
+                    del self.shots[key]
+                    self._decoded.pop(key, None)
+                if len(self.shots) >= self.MAX_SHOTS:
+                    self.shots.clear()
+                    self._decoded.clear()
+            self.shots[(guide_id, name)] = raw
+            done.append(name)
+        return done
+
+    def take_message_shot(self, msg: dict) -> list[str]:
+        """The `shot` inside a `guide` message: into the cache before the pane shows the step."""
+        shot = msg.get("shot") if isinstance(msg, dict) else None
+        if isinstance(shot, dict) and shot.get("image"):
+            return self.put_shots(str(msg.get("id") or ""), {str(shot.get("name") or ""): shot["image"]})
+        return []
+
+    def icon(self, block) -> QPixmap | None:
+        return self.icons.get(block_id(block))
+
+    def shot_bytes(self, guide_id: str | None, name: str) -> bytes | None:
+        return self.shots.get((guide_id or "", name)) if guide_id else None
+
+    def shot(self, guide_id: str | None, name: str) -> QImage | None:
+        key = (guide_id or "", name)
+        raw = self.shots.get(key) if guide_id else None
+        if raw is None:
+            return None
+        img = self._decoded.get(key)
+        if img is None:
+            img = QImage.fromData(raw)
+            if img.isNull():
+                self.shots.pop(key, None)
+                return None
+            if len(self._decoded) >= self.MAX_DECODED:
+                self._decoded.clear()
+            self._decoded[key] = img
+        return img
+
+    def layer_shot(self, guide_id: str | None, layer: int) -> QImage | None:
+        return self.shot(guide_id, f"layer_{int(layer)}")
+
+    def clear(self) -> None:
+        self.icons.clear()
+        self.shots.clear()
+        self._decoded.clear()
+
+
+ASSETS = _Assets()
+
+
+class _Shot(QWidget):
+    """The step's real screenshot: the picture fitted to the pane's width,
+    rounded, with a thin light rim - the look of the in-game pane's picture.
+    Hidden when the step has none (the grid alone, as before)."""
+
+    RADIUS = 12
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.image = QImage()
+        self._scaled: QPixmap | None = None
+        self._scaled_for = QSize()
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMinimumHeight(10)
+
+    def set_image(self, image: QImage | None) -> None:
+        self.image = image if image is not None else QImage()
+        self._scaled = None
+        self.setVisible(not self.image.isNull())
+        self._fit()
+        self.update()
+
+    def _fit(self) -> None:
+        if self.image.isNull() or self.width() < 20:
+            return
+        h = int(round(self.width() * self.image.height() / max(1, self.image.width())))
+        if h != self.height():
+            self.setFixedHeight(max(10, h))
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        self._fit()
+        super().resizeEvent(event)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        if self.image.isNull():
+            return
+        box = self.rect()
+        if self._scaled is None or self._scaled_for != box.size():
+            self._scaled = QPixmap.fromImage(self.image.scaled(box.size(), Qt.AspectRatioMode.KeepAspectRatio,
+                                                               Qt.TransformationMode.SmoothTransformation))
+            self._scaled_for = box.size()
+        pm = self._scaled
+        target = QRect(box.x() + (box.width() - pm.width()) // 2, box.y() + (box.height() - pm.height()) // 2,
+                       pm.width(), pm.height())
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(target), self.RADIUS, self.RADIUS)
+        p.setClipPath(path)
+        p.drawPixmap(target, pm)
+        p.setClipping(False)
+        p.setPen(QPen(_alpha("#FFFFFF", 0.10), 1.0))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(QRectF(target).adjusted(0.5, 0.5, -0.5, -0.5), self.RADIUS, self.RADIUS)
+        p.end()
+
+
 class _ElideLabel(QLabel):
     """A label that shortens its text with an ellipsis instead of widening its
     row (the chips must never push the pane wider than the window)."""
@@ -467,8 +788,10 @@ class _ElideLabel(QLabel):
 
 
 class _Chip(QFrame):
-    """One material, a glass row: its colour and name on the left; on the
-    right this layer's count over what is left of the total."""
+    """One material, a glass row: the block's icon (the owner's inventory crop,
+    server/build_guides/icons) - or its colour while there is none - and its
+    name on the left; on the right this layer's count over what is left of
+    the total."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -478,7 +801,8 @@ class _Chip(QFrame):
         row.setContentsMargins(12, 5, 14, 5)
         row.setSpacing(10)
         self.swatch = QLabel()
-        self.swatch.setFixedSize(16, 16)
+        self.swatch.setFixedSize(_Assets.ICON_PX, _Assets.ICON_PX)
+        self.swatch.setAlignment(Qt.AlignmentFlag.AlignCenter)  # the icon sits in the middle of its square, its own shape
         row.addWidget(self.swatch, 0, Qt.AlignmentFlag.AlignVCenter)
         self.name = _ElideLabel(13, 600)
         row.addWidget(self.name, 1)
@@ -493,22 +817,40 @@ class _Chip(QFrame):
         row.addLayout(col, 0)
         self._color = QColor(TEXT_3)
         self._dim = False
+        self.block = ""
 
     def set_material(self, m: dict, color: QColor, lang: str) -> None:
         self._color = color
         here, left, total = int(m.get("layer") or 0), int(m.get("left") or 0), int(m.get("total") or 0)
         self._dim = here == 0
+        self.block = str(m.get("block") or "")
         self.name.set_full(str(m.get("name") or m.get("block") or m.get("char") or ""))
         self.here.setText(ui(lang, "guide_this_layer", n=here))
         self.left.setText(ui(lang, "guide_all_placed", total=total) if left <= 0
                           else ui(lang, "guide_left", left=left, total=total))
-        swatch = _alpha(color, 0.45 if self._dim else 1.0)
-        self.swatch.setStyleSheet(f"background: rgba({swatch.red()}, {swatch.green()}, {swatch.blue()}, {swatch.alphaF():.2f});"
-                                  f" border-radius: 5px; border: 1px solid {color.lighter(135).name()};")
+        self.refresh_icon()
         self.name.setStyleSheet(f"font-size: 13px; font-weight: 600; color: {TEXT_3 if self._dim else TEXT};")
         self.here.setStyleSheet(f"font-size: 12px; font-weight: 600; color: {TEXT_3 if self._dim else ACCENT};")
         self.left.setStyleSheet(f"font-size: 11px; color: {TEXT_3 if self._dim else TEXT_2};")
         self.update()
+
+    def refresh_icon(self) -> None:
+        """The block's icon when the cache has it (now, or once it lands),
+        else the colour square - dimmed with the row."""
+        icon = ASSETS.icon(self.block)
+        if icon is not None:
+            self.swatch.setStyleSheet("background: transparent; border: none;")
+            self.swatch.setPixmap(fit_icon(icon, _Assets.ICON_PX, self.devicePixelRatioF()))
+            effect = QGraphicsOpacityEffect(self.swatch)
+            effect.setOpacity(0.45 if self._dim else 1.0)
+            self.swatch.setGraphicsEffect(effect)
+            return
+        self.swatch.setGraphicsEffect(None)
+        self.swatch.setPixmap(QPixmap())
+        swatch = _alpha(self._color, 0.45 if self._dim else 1.0)
+        self.swatch.setStyleSheet(f"background: rgba({swatch.red()}, {swatch.green()}, {swatch.blue()}, {swatch.alphaF():.2f});"
+                                  f" border-radius: 5px; border: 1px solid {self._color.lighter(135).name()};"
+                                  f" margin: 3px;")
 
     def paintEvent(self, event) -> None:  # noqa: N802 - a glass chip, no hard border
         p = QPainter(self)
@@ -736,24 +1078,24 @@ class BuildPane(QWidget):
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         host = QWidget()
-        hcol = QVBoxLayout(host)
+        self._hcol = hcol = QVBoxLayout(host)
         hcol.setContentsMargins(0, 0, 4, 0)
         hcol.setSpacing(8)
+        self.shot = _Shot()  # the step's real screenshot (server/build_shots.py), hidden when there is none
+        self.shot.hide()
         self.grid = LayerGrid()
-        hcol.addWidget(self.grid, 0, Qt.AlignmentFlag.AlignHCenter)
         self.front = _label(name="caps")
         self.front.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        hcol.addWidget(self.front)
         self.hint = _label(size=14, color=TEXT_2)
         self.hint.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         self.hint.setWordWrap(True)
-        hcol.addWidget(self.hint)
         self.chips_host = QWidget()
         self.chips_col = QVBoxLayout(self.chips_host)
         self.chips_col.setContentsMargins(0, 2, 0, 0)
         self.chips_col.setSpacing(4)
-        hcol.addWidget(self.chips_host)
-        hcol.addStretch(1)
+        self._with_shot: bool | None = None
+        self._build: dict | None = None
+        self._arrange(False)
         self.scroll.setWidget(host)
         bcol.addWidget(self.scroll, 1)
         nav = QHBoxLayout()
@@ -825,14 +1167,54 @@ class BuildPane(QWidget):
         self.list_hint.setText(ui(L, "guide_list_hint", ask=self.keys.get("ask", "F8")))
 
     # ---- the build page -------------------------------------------------
+    GRID_W_WITH_SHOT = 260  # the grid under the chips when the step has its picture: smaller cells
+
+    def _arrange(self, with_shot: bool) -> None:
+        """The step card's order. With the real screenshot (the brief's card):
+        the picture, the hint, the chips, then the grid - smaller - for the
+        exact pattern. Without one: the grid first, as before."""
+        if with_shot == self._with_shot:
+            return
+        self._with_shot = with_shot
+        col = self._hcol
+        order = (self.shot, self.hint, self.chips_host, self.grid, self.front) if with_shot \
+            else (self.shot, self.grid, self.front, self.hint, self.chips_host)
+        for w in order:
+            col.removeWidget(w)  # Qt deletes the item itself: a takeAt() item PySide drops later would keep
+        while col.count():  # the widget's size cache on the dead item, and the new one would never refresh
+            col.takeAt(0)  # (the hint stayed one line high after a longer text); the stretch goes
+        for w in order:
+            if w is self.grid:
+                col.addWidget(w, 0, Qt.AlignmentFlag.AlignHCenter)
+            else:
+                col.addWidget(w)
+        col.addStretch(1)
+        if self._build is not None:
+            self._fit_grid()
+
+    def _fit_grid(self) -> None:
+        if self._build is None:
+            return
+        width = self.width() - 44 if self.width() > 100 else 360
+        if self._with_shot:
+            width = min(width, self.GRID_W_WITH_SHOT)
+        layer = self.grid._layer
+        self.grid.set_build(self._build, width, self.lang)
+        if layer:
+            self.grid.set_layer(layer, animate=False)
+
     def show_build(self, name: str, build: dict) -> None:
         self.title.setText(name)
         self._colors = block_colors(build.get("palette") or {})
-        self.grid.set_build(build, self.width() - 44 if self.width() > 100 else 360, self.lang)
+        self._build = build
+        self._fit_grid()
         self.pages.setCurrentIndex(0)
 
-    def show_layer(self, layer: int, total: int, materials: list[dict], hint: str, animate: bool) -> None:
+    def show_layer(self, layer: int, total: int, materials: list[dict], hint: str, animate: bool,
+                   shot: QImage | None = None) -> None:
         L = self.lang
+        self.shot.set_image(shot)
+        self._arrange(shot is not None and not shot.isNull())
         self.grid.set_layer(layer, animate)
         self.number.setText(f"<span style='font-family:\"{HEADING_FAMILY}\"; font-size:34px; font-weight:600;"
                             f" color:{ACCENT}'>{layer}</span>"
@@ -842,6 +1224,7 @@ class BuildPane(QWidget):
         self.number.setToolTip(f"{ui(L, 'guide_layer_caps').capitalize()} {layer} / {total}")
         self.back_btn.setEnabled(layer > 1)
         self.next_btn.setToolTip(ui(L, "guide_finish" if layer >= total else "guide_next"))
+        materials = card_order(merge_materials(materials))  # one chip per block, this layer's blocks first
         while len(self._chips) < len(materials):
             chip = _Chip()
             self._chips.append(chip)
@@ -853,6 +1236,12 @@ class BuildPane(QWidget):
                 chip.show()
             else:
                 chip.hide()
+
+    def refresh_icons(self) -> None:
+        """Icons that landed after the chips were drawn."""
+        for chip in self._chips:
+            if not chip.isHidden():
+                chip.refresh_icon()
 
     # ---- the list page --------------------------------------------------
     def show_list(self, builds: list[dict], game: str, error: str = "") -> None:
@@ -901,6 +1290,7 @@ class GuideMorph(QWidget):
     state_changed = Signal(str, int, bool)  # guide id ("" when none), layer, listing
     open_requested = Signal(str)  # a build clicked in the list: main.py fetches it and sends `open`
     closed = Signal(bool)  # the pane closed (True = the last layer was finished)
+    finished = Signal(str, str)  # the last layer was finished: guide id, name (the in-game pane shows the front shot)
     phase_changed = Signal(str)  # opening | open | closing | closed: the window hides its orb meanwhile
 
     def __init__(self, parent: QWidget, small_orb: QWidget) -> None:
@@ -981,6 +1371,8 @@ class GuideMorph(QWidget):
         action = str(msg.get("action") or "")
         spoken = str(msg.get("command") or "") not in ("", "click")
         self.pane.setGeometry(self.pane_rect().toRect())
+        if action in ("open", "layer"):
+            ASSETS.take_message_shot(msg)  # the step's real screenshot rides with the message
         if action == "open":
             build = msg.get("build")
             if not isinstance(build, dict):
@@ -1051,7 +1443,21 @@ class GuideMorph(QWidget):
         self.layer = layer
         materials = self.materials_by_layer[layer - 1] if layer - 1 < len(self.materials_by_layer) else []
         hint = self.hints[layer - 1] if layer - 1 < len(self.hints) else ""
-        self.pane.show_layer(layer, self.total, materials, hint, animate)
+        self.pane.show_layer(layer, self.total, materials, hint, animate, ASSETS.layer_shot(self.guide_id, layer))
+
+    def guide_assets(self, msg: dict) -> None:
+        """A `guide_assets` message (main.py, client/build_assets.py): icons
+        and shots into the shared cache; the step on screen is redrawn when
+        it gains its picture or an icon."""
+        icons = ASSETS.put_icons(msg.get("icons") if isinstance(msg.get("icons"), dict) else {})
+        gid = str(msg.get("id") or "")
+        shots = ASSETS.put_shots(gid, msg.get("shots") if isinstance(msg.get("shots"), dict) else {})
+        if self.build is None or self.phase not in ("opening", "open"):
+            return
+        if icons:
+            self.pane.refresh_icons()
+        if shots and gid == self.guide_id and f"layer_{self.layer}" in shots:
+            self._show_layer(self.layer, animate=False)  # the step gains its picture
 
     # ---- the buttons and keys ----------------------------------------------
     def step(self, delta: int) -> None:
@@ -1106,6 +1512,8 @@ class GuideMorph(QWidget):
         if self.phase not in ("opening", "open"):
             return
         self._done = done
+        if done and self.guide_id:
+            self.finished.emit(self.guide_id, self.name)
         self.guide_id, self.build, self.layer, self.total, self.listing = None, None, 0, 0, False
         self.materials_by_layer, self.hints = [], []
         self._emit_state()
@@ -1168,15 +1576,11 @@ class GuideMorph(QWidget):
         length = OPEN_MS if self.phase == "opening" else CLOSE_MS
         if reduced_motion():
             length = FADE_MS
-        u = (time.monotonic() - self._t0) * 1000 / length
-        if u >= 1.0:
+        ms = (time.monotonic() - self._t0) * 1000
+        if ms >= length:
             self._finish()
             return
-        # the content: fades in over the last 180 ms of an open, out over the first 140 ms of a close
-        if self.phase == "opening":
-            a = _smooth((u * length - (length - 180)) / 180) if not reduced_motion() else _smooth(u)
-        else:
-            a = 1.0 - (_smooth(u * length / 140) if not reduced_motion() else _smooth(u))
+        a = content_opacity(self.phase, ms, reduced_motion())
         if a > 0.0:
             if not self.pane.isVisible():
                 self.pane.setGeometry(self.pane_rect().toRect())
@@ -1188,33 +1592,10 @@ class GuideMorph(QWidget):
         self.update()
 
     def shape_progress(self, now: float | None = None) -> tuple[float, float, float, float]:
-        """(e, swell, wobble, opacity) of the glass at `now`: e = 0 the orb's
-        ellipse (times `swell`), 1 the pane; a negative e is the breath at the
-        end of a close (the ellipse a little larger, settling)."""
-        if self.phase == "open":
-            return 1.0, 1.0, 0.0, 1.0
-        if self.phase == "closed":
-            return 0.0, 1.0, 0.0, 0.0
+        """(e, swell, wobble, opacity) of the glass at `now` - `morph_progress()`
+        for this morph's phase and clock."""
         now = time.monotonic() if now is None else now
-        if reduced_motion():
-            u = _clamp((now - self._t0) * 1000 / FADE_MS)
-            return 1.0, 1.0, 0.0, (u if self.phase == "opening" else 1.0 - u)
-        ms = (now - self._t0) * 1000
-        if self.phase == "opening":
-            # the drop forms (the head fills out, its edge starts to move), then stretches
-            form = _smooth(ms / 90)
-            e = _ease_out((ms - 90) / 470) if ms > 90 else 0.0
-            swell = 1.0 + 0.45 * form * (1.0 - e)
-            wobble = form * (1.0 - _smooth((ms - 380) / 180))
-            return e, swell, wobble, 1.0
-        # closing: the shape waits for the content to fade, pulls back, then one breath
-        v = _clamp((ms - 120) / 420)
-        e = 1.0 - _smooth(v)
-        if ms <= 540:
-            wobble = _smooth((ms - 120) / 120) * (1.0 - _smooth((ms - 460) / 80))
-            return e, 1.0 + 0.45 * (1.0 - e) * _smooth(v), wobble, 1.0
-        breath = math.sin(math.pi * _clamp((ms - 540) / 120))  # the drop settles: a small overshoot
-        return -0.06 * breath, 1.0, 0.0, 1.0
+        return morph_progress(self.phase, (now - self._t0) * 1000, reduced_motion())
 
     def paintEvent(self, event) -> None:  # noqa: N802
         if self.phase == "closed":
@@ -1260,14 +1641,7 @@ class GuideMorph(QWidget):
         p.end()
 
     def _face_opacity(self) -> float:
-        """How much of Ombri's face still shows on the drop: 1 at the very
-        start of an open and the very end of a close, 0 in between."""
-        if reduced_motion() or self.phase not in ("opening", "closing"):
-            return 0.0
-        ms = (time.monotonic() - self._t0) * 1000
-        if self.phase == "opening":
-            return 1.0 - _smooth(ms / FACE_MS)
-        return _smooth((ms - (CLOSE_MS - FACE_MS)) / FACE_MS)
+        return face_opacity(self.phase, (time.monotonic() - self._t0) * 1000, reduced_motion())
 
     def hideEvent(self, event) -> None:  # noqa: N802 - nothing moves while the window is hidden
         self._timer.stop()

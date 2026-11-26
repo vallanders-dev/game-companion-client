@@ -24,23 +24,32 @@ page - an overlay over the stack on which the orb morphs into the pane when
 a guide opens ("quero construir uma casa", the "Construir" button) and back
 when it closes. The pane keeps the guide's state in memory; the window
 re-emits it (`guide_state_changed`) for main.py's next turn_start.
+
+Contextual hints (client/gui/hints.py, 2026-11-25): the window owns the
+shared `coach` (one hints.json with the in-game pane) and lends it to the
+chat. Its own three moments: the controller's tile on the home column
+(`pad_ask`), the brewing strip on the home column with the chat closed
+(`recipe_in_chat`), "Minhas notas" with notes in it (`note_recall`).
 """
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QCursor, QFont, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout, QLabel, QProgressBar, QPushButton, QScrollArea,
     QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from client.gui import indicator, motion
+from client.gui import hints as hints_mod, indicator, motion, pane_store
 from client.gui.build_pane import GuideMorph
 from client.gui.chat_view import CHAT_W, ChatView
 from client.gui.fonts import HEADING_FAMILY, ensure_fonts_loaded
 from client.gui.orb import HALO_STATES, breathing_scale, draw_sphere, draw_thinking_halo, sphere_image, state_color
+from client.gui import recipe_strip
+from client.gui.recipe_strip import RecipeOverlay
 from client.gui.settings_panel import SettingsPanel
 from client.gui.shadow import HEAD_CY, HEAD_RX, HEAD_RY
 from client.gui.speaking import make_design
@@ -252,6 +261,22 @@ class NoteCard(QFrame):
 VIEWS = ("ombri", "notes", "settings")  # the home column; the chat opens beside it
 
 
+class _CloseWithStrip(QObject):
+    """Gives the footer line its text back when `pad_ask`'s strip hides
+    (timed out, ticked off, replaced). Owned by the footer, so it dies with
+    it: never a call into a deleted widget when the window goes."""
+
+    def __init__(self, owner: QWidget, on_close) -> None:
+        super().__init__(owner)
+        self.on_close = on_close
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        # isHidden(): the strip itself was hidden - not the window going to the tray with it
+        if event.type() == QEvent.Type.Hide and obj.isHidden():
+            self.on_close()
+        return False
+
+
 class _ChatClip(QWidget):
     """The strip right of the home column. The chat inside keeps its full
     width while the window widens, so nothing reflows mid-animation - the
@@ -283,7 +308,7 @@ class MainWindow(QWidget):
     guide_open_requested = Signal(str)
     guide_list_requested = Signal()
 
-    def __init__(self) -> None:
+    def __init__(self, store_dir: Path | None = None) -> None:
         super().__init__(None, Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
         ensure_fonts_loaded()
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -309,6 +334,10 @@ class MainWindow(QWidget):
         motion.install_ripples()  # every button: a drop's ring where it's pressed
         self.notes: list[dict] | None = None  # None = loading
         self.notes_error = ""
+        # the hints' shared store (client/gui/hints.py): the pane's folder, a scratch one in a test
+        self.coach = hints_mod.Hints(store_dir if store_dir is not None else pane_store.default_dir())
+        self._taught: set[str] = set()  # home-column hints offered in this run (pad_ask: once per run)
+        self._footer_lent = False  # the footer line's place holds `pad_ask` (see _teach)
 
         root = QWidget(self)
         self.root = root
@@ -339,6 +368,7 @@ class MainWindow(QWidget):
         self.settings = SettingsPanel()
         self.stack.addWidget(self._build_settings_page())
         self.chat = ChatView()
+        self.chat.coach = self.coach
         self.chat.send_requested.connect(self.chat_send_requested.emit)
         self.chat.mic_requested.connect(self.chat_mic_requested.emit)
         self.settings.advanced.links_cleared.connect(lambda: self.chat.set_links([]))
@@ -353,6 +383,10 @@ class MainWindow(QWidget):
         self.guide.open_requested.connect(self.guide_open_requested.emit)
         self.guide.phase_changed.connect(lambda _phase: self._refresh())
         self.stack.installEventFilter(self)  # keep the overlay on the stack's geometry
+        # The brewing strip (client/gui/recipe_strip.py): a small glass row over the
+        # key tiles of the Ombri view, for ~12 s after a potion recipe question.
+        self.recipe = RecipeOverlay(root)
+        self.recipe.changed.connect(self._refresh)
         for orb in (self.s_orb, self.w_orb):
             # Hidden while the glass is out (the drop IS the orb: one shape, never two),
             # the room kept so nothing under it moves.
@@ -509,6 +543,7 @@ class MainWindow(QWidget):
         col.addWidget(game)
 
         usage = _card()
+        self.s_usage_card = usage  # `recipe_in_chat` hangs from its bottom edge, just over the strip
         u = QVBoxLayout(usage)
         u.setContentsMargins(16, 14, 16, 14)
         u.setSpacing(10)
@@ -528,9 +563,12 @@ class MainWindow(QWidget):
         u.addWidget(self.s_bar)
         col.addWidget(usage)
 
-        self.s_keys = QGridLayout()
+        # the key tiles' row in a box of its own (the brewing strip takes its rectangle)
+        self.s_keys_box = QWidget()
+        self.s_keys = QGridLayout(self.s_keys_box)
+        self.s_keys.setContentsMargins(0, 0, 0, 0)
         self.s_keys.setSpacing(8)
-        col.addLayout(self.s_keys)
+        col.addWidget(self.s_keys_box)
 
         # "Conversar com o Ombri" (docs/chat_redesign.md): the chat opens beside this column.
         self.s_chat = QPushButton()
@@ -646,6 +684,16 @@ class MainWindow(QWidget):
             card = NoteCard(note, L)
             card.delete_requested.connect(self.note_delete_requested.emit)
             self.n_list.insertWidget(i, card)
+        if self.view == "notes" and self.isVisible():
+            QTimer.singleShot(0, self._teach_notes)  # after the cards are laid out: the hint right under the last one
+
+    def _teach_notes(self) -> None:
+        if self.view != "notes" or not self.notes or not self.isVisible():
+            return
+        self.n_list.activate()  # the cards' places now, not at the next paint
+        last = self.n_list.itemAt(len(self.notes) - 1).widget() if self.n_list.count() > len(self.notes) else None
+        top = last.geometry().bottom() + 1 + hints_mod.MARGIN if last is not None else None
+        self.coach.show("note_recall", self.n_list_host, self.lang, top=top)
 
     def _rebuild_keys(self) -> None:
         while self.s_keys.count():
@@ -666,7 +714,17 @@ class MainWindow(QWidget):
             name = _label(ui(self.lang, label), size=12, color=TEXT_2)
             name.setAlignment(Qt.AlignmentFlag.AlignHCenter)
             t.addWidget(name)
+            policy = tile.sizePolicy()
+            policy.setRetainSizeWhenHidden(True)  # the brewing strip takes the row for a while; nothing moves
+            tile.setSizePolicy(policy)
             self.s_keys.addWidget(tile, 0, i)
+        self._show_key_tiles(not self.recipe.active if hasattr(self, "recipe") else True)
+
+    def _show_key_tiles(self, shown: bool) -> None:
+        for i in range(self.s_keys.count()):
+            w = self.s_keys.itemAt(i).widget()
+            if w is not None:
+                w.setVisible(shown)
 
     # ------------------------------------------------------------------ updates
     def _refresh(self) -> None:
@@ -711,7 +769,8 @@ class MainWindow(QWidget):
         self.s_build.setText(ui(L, "guide_button"))
         self.s_build.setVisible(self.guide_enabled)
         self.w_settings.setText(ui(L, "settings"))
-        self.s_footer.setText(ui(L, "footer"))
+        if not self._footer_lent:  # lent to `pad_ask`: the text comes back when the hint goes
+            self.s_footer.setText(ui(L, "footer"))
 
         self.w_title.setText(ui(L, "wait_title"))
         self.w_body.setText(ui(L, "wait_body", **kw))
@@ -735,6 +794,54 @@ class MainWindow(QWidget):
             self.guide.raise_()
         for orb in (self.s_orb, self.w_orb):
             orb.setVisible(not self.guide.active)  # the drop took its place
+        # the strip shows on the Ombri view only (its clock runs on either way); the
+        # key tiles under it step aside meanwhile, their room kept
+        self.recipe.setVisible(self.view == "ombri" and index == 1 and self.recipe.active)
+        self._show_key_tiles(not self.recipe.active)
+        if self.recipe.isVisible():
+            self._place_recipe()
+            self.recipe.raise_()
+        self._teach()
+
+    def _home_shown(self) -> bool:
+        """The status page of the home column is what the player sees now."""
+        return self.isVisible() and self.view == "ombri" and self.stack.currentIndex() == 1
+
+    def _teach(self) -> None:
+        """The home column's own hints, each once per run at most (the store
+        keeps the budget across runs): `pad_ask` the first time the key tiles
+        carry the controller's combo while the status page is up. Never over
+        the tiles' labels (owner, 2026-11-25), and the column has no spare
+        height (a taller one squeezes the mascot under its "Pronto" or pushes
+        the voice card off the window): it takes the footer line's place - a
+        standing reminder - whose text comes back when the hint goes. Nothing
+        moves."""
+        if "pad_ask" not in self._taught and self.keys.get("pad") and self._home_shown() and not self.recipe.active:
+            self._taught.add("pad_ask")
+            footer = self.s_footer
+            footer.setFixedHeight(footer.height())  # the place keeps its size without its text
+            footer.setText("")
+            self._footer_lent = True
+            if not self.coach.show("pad_ask", footer, self.lang, top=0, ask=self.keys["ask"], pad=self.keys["pad"]) \
+                    or self.coach.strip("pad_ask") is None:
+                self._give_footer_back()
+                return
+            strip = self.coach.strip("pad_ask")
+            strip.top = max(0, (footer.height() - strip.height()) // 2)  # centred in the footer's place
+            strip.place()
+            strip.installEventFilter(_CloseWithStrip(footer, self._give_footer_back))
+
+    def _give_footer_back(self) -> None:
+        if not self._footer_lent:
+            return
+        self._footer_lent = False
+        self.s_footer.setMinimumHeight(0)
+        self.s_footer.setMaximumHeight(16777215)  # QWIDGETSIZE_MAX
+        self.s_footer.setText(ui(self.lang, "footer"))
+
+    def showEvent(self, event) -> None:  # noqa: N802 - back from the tray: a hint due meanwhile
+        super().showEvent(event)
+        QTimer.singleShot(0, self._teach)
 
     def set_state(self, state: str) -> None:
         self.state = state
@@ -875,7 +982,48 @@ class MainWindow(QWidget):
             # The stack sits inside the home column now: map it into the root.
             top_left = self.stack.mapTo(self.root, QPoint(0, 0))
             self.guide.setGeometry(QRect(top_left, self.stack.size()))
+            self._place_recipe()
         return super().eventFilter(obj, event)
+
+    # ------------------------------------------------------------------ the brewing strip
+    def _recipe_rect(self) -> QRect:
+        """Where the strip lives: the key tiles' row of the status page (no
+        button there), mapped into the root; the stack's middle when that
+        row has no geometry yet."""
+        page = self.stack.widget(1)
+        rect = self.s_keys_box.geometry() if page is not None else QRect()
+        if page is not None and rect.isValid() and rect.height() > 0:
+            top_left = page.mapTo(self.root, rect.topLeft())
+            return QRect(top_left, rect.size())
+        top_left = self.stack.mapTo(self.root, QPoint(0, 0))
+        return QRect(top_left.x(), top_left.y() + self.stack.height() // 2 - 40, self.stack.width(), 80)
+
+    def _place_recipe(self) -> None:
+        rect = self._recipe_rect()
+        # room for the glass's glow and a tall strip (two lines): a little beyond the tiles
+        self.recipe.setGeometry(rect.adjusted(0, -8, 0, 8))
+
+    def show_recipe(self, card: dict, icons: dict | None = None) -> None:
+        """A `recipe` card from the server (main.py -> ui_process): the strip
+        on the Ombri view for a while, and in the chat for good. `icons` are
+        the PNGs main.py already has; the rest arrive with `recipe_icons`."""
+        if icons:
+            recipe_strip.set_icons(icons)
+        clean = recipe_strip.clean_recipe(card)
+        if clean is None:
+            return
+        self.chat.set_recipe(clean)
+        self.recipe.show_recipe(clean)
+        self._refresh()
+        if self.recipe.isVisible() and not self.chat_open:
+            # the strip goes on its own in ~12 s; with the chat closed, say where it stays
+            self.coach.show("recipe_in_chat", self.s_usage_card, self.lang)
+
+    def recipe_icons(self, icons: dict) -> None:
+        """Icons fetched after the strip was shown: chips become icons in place."""
+        if recipe_strip.set_icons(icons):
+            self.recipe.refresh_icons()
+            self.chat.refresh_recipe_icons()
 
     def keyPressEvent(self, event) -> None:  # noqa: N802 - the pane's keys: arrows, Home/End, 1-9, Esc
         if self.view == "ombri" and self.guide.active and self.guide.handle_key(event):

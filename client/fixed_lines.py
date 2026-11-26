@@ -62,6 +62,11 @@ TEXTS: dict[str, dict[str, str]] = {
                             "Executar como administrador.",
         "web_search": "Deixa eu pesquisar isso rapidinho.",
         "web_search_still": "Tô quase lá, só mais um instante.",
+        # The in-game pane opened while the game owns the display in exclusive
+        # fullscreen, where no window can show over it (client/gui/game_pane.py,
+        # 2026-11-24). Said once per run, instead of failing silently.
+        "pane_fullscreen": "O jogo está em tela cheia exclusiva, então o Windows não me deixa mostrar o painel "
+                           "por cima dele. Em janela ou tela cheia sem bordas ele aparece.",
         # A second copy of the client (both would hear every key press and
         # answer twice - seen with the first tester).
         "already_running": "Eu já estou rodando em outra janela. Feche aquela antes de me abrir de novo.",
@@ -82,6 +87,8 @@ TEXTS: dict[str, dict[str, str]] = {
                             "choosing Run as administrator.",
         "web_search": "Let me look that up real quick.",
         "web_search_still": "Almost there, just a moment.",
+        "pane_fullscreen": "The game is in exclusive fullscreen, so Windows won't let me show the panel over it. "
+                           "In windowed or borderless fullscreen it shows up.",
         "already_running": "I'm already open in another window. Close that one before opening me again.",
         "sample": "Hey! I'm Ombri. Just press F8 and ask me anything about your game.",
     },
@@ -103,6 +110,8 @@ TEXTS: dict[str, dict[str, str]] = {
                             "Ejecutar como administrador.",
         "web_search": "Déjame buscarlo rapidito.",
         "web_search_still": "Ya casi, un momento más.",
+        "pane_fullscreen": "El juego está en pantalla completa exclusiva, así que Windows no me deja mostrar el panel "
+                           "encima. En ventana o pantalla completa sin bordes sí aparece.",
         "already_running": "Ya estoy abierto en otra ventana. Cierra esa antes de abrirme de nuevo.",
         "sample": "¡Hola! Soy Ombri. Solo presiona F8 y pregúntame lo que quieras sobre tu juego.",
     },

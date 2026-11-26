@@ -20,11 +20,23 @@ anything from `server/`, the whole point of the split).
 from __future__ import annotations
 
 import json
+import socket
 import struct
 import threading
 
 
 TEXT_MAX = 500  # characters of a typed question or reply (server/session.py TEXT_MAX)
+# The biggest message the server sends: a library `visual` open carries up to
+# server/visual_pane.MAX_ITEMS_BYTES (3 MiB) of pictures, base64 (x4/3), plus
+# their words. websockets' default (1 MiB) would drop the connection on it.
+WS_MAX_MESSAGE_BYTES = 6 * 1024 * 1024
+# The socket's send buffer (2026-11-26). The F8 frame goes out at the first
+# spoken word, from the recording thread (EarlyFrame): with the OS default
+# (64 KB on Windows) a 130-250 KB frame on a slow uplink would block that
+# thread until the link drained it, and the mic would overflow. 1 MiB takes
+# the frame (and the live words behind it) at once; the link drains it while
+# the player talks. Linux caps it at net.core.wmem_max, still above a frame.
+SEND_BUFFER_BYTES = 1 << 20
 
 
 def _app_version() -> str:
@@ -195,6 +207,63 @@ class LiveTranscript:
             self._release()
 
 
+class EarlyFrame:
+    """The F8 screenshot, sent ahead of the question (2026-11-26, speed step 2
+    part B; server/app.py `early_frame`, "early_frame" in auth_ok.features).
+
+    Captured at the press as before, but sent the moment the player's first
+    words are heard (listen.record_until_silence(on_speech=)), under the turn
+    id the question will use - so the server's 4-5 s screen read runs while
+    the player talks (2-4 s) instead of starting when they stop. A silent take
+    sends nothing and costs nothing. ask(early_frame=self) then says
+    "early_frame": true instead of sending the picture again - unless the
+    connection was remade in between (the server's read lives on the
+    connection), when the picture goes with the question exactly as before.
+    Never raises: a failed send just means the old path."""
+
+    def __init__(self, session: "ServerSession", turn_id: str, game: str, frame: bytes) -> None:
+        self._s = session
+        self.turn_id = turn_id
+        self.game = game
+        self.frame = frame
+        self.sent = False
+        self._gen = -1  # the connection the frame went on
+
+    def send(self) -> bool:
+        """Called on the recording thread (listen.record_until_silence's
+        `on_speech`): never reconnects there - a dead connection just means the
+        picture goes with the question, as LiveTranscript does for its words."""
+        if self.sent:
+            return True
+        ws = self._s._ws
+        if ws is None or not self._s.connected():
+            return False
+        try:
+            with self._s._io_lock:
+                ws.send(json.dumps({"type": "early_frame", "turn_id": self.turn_id, "game": self.game}))
+                ws.send(self.frame)
+                self._gen = self._s._gen
+            self.sent = True
+        except Exception:  # noqa: BLE001 - a dead connection: the turn's own send reconnects
+            self._s.close()
+            self.sent = False
+        return self.sent
+
+    def usable(self) -> bool:
+        """The server still holds this read: sent, and no reconnect since."""
+        return self.sent and self._gen == self._s._gen
+
+    def cancel(self) -> None:
+        """The take ended with no question: the server drops the read (best effort)."""
+        if not self.usable():
+            return
+        try:
+            with self._s._io_lock:
+                self._s._ws.send(json.dumps({"type": "turn_cancel", "turn_id": self.turn_id}))
+        except Exception:  # noqa: BLE001 - the server's own timeout drops it then
+            pass
+
+
 class ServerSession:
     def __init__(self, server_url: str, token: str, voice: str | None = None,
                  fallback_urls: tuple[str, ...] = ()) -> None:
@@ -217,6 +286,7 @@ class ServerSession:
         # know, so guessing would mean waiting for nothing.
         self.features: frozenset[str] = frozenset()
         self._ws = None
+        self._gen = 0  # +1 per connection made: what an EarlyFrame was sent on
         self._io_lock = threading.RLock()  # requests vs the keepalive watcher
         self._keepalive: threading.Thread | None = None
         self._stop = threading.Event()
@@ -235,7 +305,7 @@ class ServerSession:
                 self._ws = connect(
                     url, additional_headers={"Authorization": f"Bearer {self.token}",
                                              "X-Parca-Version": _app_version()},
-                    open_timeout=timeout,
+                    open_timeout=timeout, max_size=WS_MAX_MESSAGE_BYTES,
                 )
                 raw = self._ws.recv(timeout=timeout)
             except Exception as exc:  # noqa: BLE001 - connection/handshake failure, not our business which kind
@@ -243,6 +313,13 @@ class ServerSession:
                 failure = exc
                 continue
             self.server_url = url  # stick with the address that answered
+            self._gen += 1
+            try:  # see SEND_BUFFER_BYTES; a socket we can't reach keeps the OS default
+                sock = getattr(self._ws, "socket", None)
+                if sock is not None:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SEND_BUFFER_BYTES)
+            except Exception:  # noqa: BLE001
+                pass
             break
         else:
             raise ServerError(f"não consegui conectar ao servidor: {failure}") from failure
@@ -266,6 +343,13 @@ class ServerSession:
 
     def supports(self, feature: str) -> bool:
         return feature in self.features
+
+    def early_frame(self, turn_id: str, game: str, frame: bytes | None) -> "EarlyFrame | None":
+        """The F8 frame to send at the first spoken word (EarlyFrame), or None
+        when there is no picture or the server doesn't know the message."""
+        if frame is None or not self.supports("early_frame"):
+            return None
+        return EarlyFrame(self, turn_id, game, frame)
 
     @property
     def http_base(self) -> str:
@@ -327,6 +411,56 @@ class ServerSession:
 
         query = urlencode({"language": language or "pt"})
         return self._rest("GET", f"/v1/build_guides/{quote(str(guide_id), safe='')}?{query}")
+
+    def _rest_bytes(self, path: str, timeout: float, limit: int = 512 * 1024) -> bytes:
+        """A small file from our own server (an icon, a screenshot): the first
+        `limit` bytes of the body. The same errors as `_rest`."""
+        import urllib.error
+        import urllib.request
+
+        req = urllib.request.Request(self.http_base + path, method="GET",
+                                     headers={"Authorization": f"Bearer {self.token}", "X-Parca-Version": _app_version()})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - our own server
+                return resp.read(limit)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401:
+                raise AuthError("servidor recusou o token") from exc
+            raise ServerError(f"servidor respondeu {exc.code}") from exc
+        except Exception as exc:  # noqa: BLE001 - DNS, timeout, refused
+            raise ServerError(f"não consegui falar com o servidor: {exc}") from exc
+
+    # -- the brewing strip (server/brewing.py, 2026-11-24): the icons ---------
+    def brewing_icon(self, icon_id: str, timeout: float = 4.0) -> bytes:
+        """One icon of the strip (`GET /v1/brewing/icons/{id}.png`), the PNG
+        bytes. The id is letters, digits and underscores only (the server
+        checks it against its closed list; here it just never becomes a path)."""
+        import re
+
+        if not re.match(r"^[a-z0-9_]{1,40}$", str(icon_id or "")):
+            raise ServerError("ícone inválido")
+        return self._rest_bytes(f"/v1/brewing/icons/{icon_id}.png", timeout)
+
+    # -- the Build pane's pictures (server/build_shots.py, 2026-11-24) --------
+    def build_icon(self, block: str, timeout: float = 4.0) -> bytes:
+        """One block's icon for the chips (`GET /v1/build_guides/icons/{block}.png`),
+        the PNG bytes; `block` is the id without "minecraft:", letters, digits
+        and underscores only."""
+        import re
+
+        if not re.match(r"^[a-z0-9_]{1,40}$", str(block or "")):
+            raise ServerError("ícone inválido")
+        return self._rest_bytes(f"/v1/build_guides/icons/{block}.png", timeout)
+
+    def build_shot(self, guide_id: str, name: str, timeout: float = 6.0) -> bytes:
+        """One real screenshot of a build (`GET /v1/build_guides/{id}/shots/{name}.jpg`):
+        `layer_<n>`, `front`, `side` or `back` - the JPEG bytes."""
+        import re
+
+        if not re.match(r"^[a-z0-9_]{1,64}$", str(guide_id or "")) \
+                or not re.match(r"^(front|side|back|layer_[1-9][0-9]?)$", str(name or "")):
+            raise ServerError("imagem inválida")
+        return self._rest_bytes(f"/v1/build_guides/{guide_id}/shots/{name}.jpg", timeout)
 
     def list_notes(self) -> list[dict]:
         """This tester's own notes, newest first (`GET /v1/notes`)."""
@@ -416,7 +550,7 @@ class ServerSession:
     def is_connected(self) -> bool:
         return self._ws is not None
 
-    def _send_opening(self, frames: list) -> None:
+    def _send_opening(self, frames: list, after_reconnect: list | None = None) -> None:
         """Sends the opening frames of a request (turn_start / stt_request
         + its binary frames). Reconnects first if the connection is known to
         be gone, and if the send itself fails - the idle connection was
@@ -424,12 +558,15 @@ class ServerSession:
         reconnects and resends ONCE: nothing of this request reached the
         server, so a resend can't double anything. A connection that dies
         mid-answer is NOT retried (the server may already have done paid
-        work); that one turn fails, and the next request reconnects here."""
+        work); that one turn fails, and the next request reconnects here.
+        `after_reconnect`: what to send instead once the connection had to be
+        remade (a turn that counted on an EarlyFrame sends its picture again)."""
+        gen = self._gen
         for attempt in (1, 2):
             if self._ws is None:
                 self.connect()
             try:
-                for frame in frames:
+                for frame in (after_reconnect if after_reconnect is not None and self._gen != gen else frames):
                     self._ws.send(frame)
                 return
             except Exception as exc:  # noqa: BLE001 - any send failure means a dead connection
@@ -473,6 +610,10 @@ class ServerSession:
         guide: dict | None = None,
         on_guide=None,
         text_only: bool = False,
+        game_context: dict | None = None,
+        visual: dict | None = None,
+        on_visual=None,
+        early_frame: "EarlyFrame | None" = None,
     ) -> dict:
         """One ask-turn, start to finish - blocks until `turn_result`
         arrives (or the connection breaks). `wav_bytes` is the real path
@@ -504,12 +645,29 @@ class ServerSession:
         lists the builds, {} when closed - sent only when the server advertises
         "build_guide"; `on_guide(body)` gets the server's `guide` message (the
         pane's next state) when a command landed.
+        `game_context` (2026-11-24, client/game_context.py): {"edition", "version",
+        "language"} of the running game, read by code - three short values, null
+        when unknown, never a path; sent only when the server advertises
+        "game_context", and only for a game the app has a reader for.
+        `visual` (2026-11-24, the in-game pane, client/gui/game_pane.py): what
+        the pane shows - open, kind, index/count, pinned, title, the query and
+        style words of the pictures, the guide - sent only when the server
+        advertises "visual"; `on_visual(body)` gets the server's `visual`
+        message (pictures for the pane, or a command on it).
+        `early_frame` (2026-11-26, EarlyFrame): this turn's picture already went
+        to the server at the first spoken word - the turn says so instead of
+        sending it again; if the connection was remade since (or the send had
+        failed), `screenshot_bytes` goes with the question as always.
         """
         msg: dict = {
             "type": "turn_start", "turn_id": turn_id, "kind": "ask", "game": game,
             "has_screenshot": screenshot_bytes is not None, "has_audio": wav_bytes is not None,
             **self._voice_field(),
         }
+        with_picture: list | None = None  # the same opening with the picture, for a reconnect
+        if early_frame is not None and early_frame.usable() and screenshot_bytes is not None:
+            msg["early_frame"] = True  # the server holds this turn's read (its id matches)
+            msg["has_screenshot"] = False
         if question_text is not None:
             msg["question_text"] = question_text
         if text_only:
@@ -543,18 +701,27 @@ class ServerSession:
             msg["play_history_unasked"] = True  # a morning report asks first
         if guide is not None and self.supports("build_guide"):
             msg["guide"] = guide  # the Build pane's state; the server stays stateless about it
+        if game_context is not None and self.supports("game_context"):
+            msg["game_context"] = game_context  # edition / version / the game's language, by code
+        if visual is not None and self.supports("visual"):
+            msg["visual"] = visual  # the in-game pane's state; the server stays stateless about it
         frames: list = [json.dumps(msg)]
-        if screenshot_bytes is not None:
+        if screenshot_bytes is not None and not msg.get("early_frame"):
             frames.append(screenshot_bytes)
         if wav_bytes is not None:
             frames.append(wav_bytes)
-        self._send_opening(frames)
+        if msg.get("early_frame"):
+            # the connection remade under us: the server's early read is gone with it
+            again = {**msg, "has_screenshot": True}
+            again.pop("early_frame")
+            with_picture = [json.dumps(again), screenshot_bytes] + ([wav_bytes] if wav_bytes is not None else [])
+        self._send_opening(frames, with_picture)
 
         return self._pump(turn_id, cancel, on_state, on_meta, on_text, on_audio, on_usage, record_reply,
-                          on_cards=on_cards, on_guide=on_guide)
+                          on_cards=on_cards, on_guide=on_guide, on_visual=on_visual)
 
     def _pump(self, turn_id: str, cancel, on_state, on_meta, on_text, on_audio, on_usage,
-              record_reply=None, on_cards=None, on_guide=None) -> dict:
+              record_reply=None, on_cards=None, on_guide=None, on_visual=None) -> dict:
         cancel_sent = False
         while True:
             if cancel is not None and cancel.is_set() and not cancel_sent:
@@ -598,6 +765,9 @@ class ServerSession:
             elif mtype == "guide" and on_guide is not None:
                 # the Build pane's next state (server/build_guide.py), before the spoken line
                 on_guide({k: v for k, v in data.items() if k != "type"})
+            elif mtype == "visual" and on_visual is not None:
+                # pictures for the in-game pane, or a command on it (client/gui/game_pane.py)
+                on_visual({k: v for k, v in data.items() if k != "type"})
             elif mtype == "turn_result":
                 return data
             # anything else (a stray note_prompt/stt_result meant for a

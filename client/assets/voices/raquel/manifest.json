@@ -16,5 +16,6 @@
   "already_running": "Eu já estou rodando em outra janela. Feche aquela antes de me abrir de novo.",
   "sample": "Oi! Eu sou o Ombri. É só apertar F8 e me perguntar o que quiser sobre o seu jogo.",
   "game_none": "Beleza, sem jogo então. Não pergunto mais.",
-  "ack": "Oi?"
+  "ack": "Oi?",
+  "pane_fullscreen": "O jogo está em tela cheia exclusiva, então o Windows não me deixa mostrar o painel por cima dele. Em janela ou tela cheia sem bordas ele aparece."
 }

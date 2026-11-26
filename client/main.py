@@ -68,7 +68,7 @@ from client.capture import (
     remember_game_for_foreground,
     resolve_spoken_game,
 )
-from client import play_history, texts, voices
+from client import brewing_icons, build_assets, game_context, play_history, texts, voices
 from client.config import (DEFAULT_SERVER_URL, FALLBACK_SERVER_URLS, load_client_settings, load_follow_up_seconds,
                            load_saved_voice, load_voice_commands, save_token)
 from client.fixed_audio import (
@@ -123,6 +123,13 @@ _VOICE: "VoiceListener | None" = None
 # commands and from every `guide` message: what the next turn_start.guide says.
 # The pane is the keeper; this is a copy, nothing is written anywhere.
 _GUIDE: dict = {"id": None, "layer": 0, "list": False}
+# The in-game pane's state (client/gui/game_pane.py; the owner's visual-pane
+# brief, 2026-11-24), mirrored from the UI's "pane_state:<json>" commands:
+# what the next turn_start.visual says, so the server's matcher (PR 3) can
+# read "outra", "essa", "fecha" with the pane in mind. A copy of what the
+# pane reports - never the pictures' bytes, never a question.
+_PANE: dict = {}
+PANE_STATE_KEYS = ("open", "kind", "folded", "index", "count", "pinned", "title", "query", "style", "guide")
 
 
 def _set_voice(key: str) -> None:
@@ -175,17 +182,17 @@ def _mic_busy():
             voice.set_mode(previous)
 
 
-def _record(settings, live=None) -> bytes | None:
+def _record(settings, live=None, on_speech=None) -> bytes | None:
     with _mic_busy():
-        return _record_now(settings, live)
+        return _record_now(settings, live, on_speech)
 
 
-def _record_now(settings, live=None) -> bytes | None:
+def _record_now(settings, live=None, on_speech=None) -> bytes | None:
     return record_until_silence(
         silence_hang=settings.mic_silence_hang, max_duration=settings.mic_max_duration,
         min_duration=settings.mic_min_duration, vad_threshold=settings.mic_vad_threshold,
         speech_pad_ms=settings.mic_speech_pad_ms, no_speech_timeout=settings.mic_no_speech_timeout,
-        smart_turn=getattr(settings, "smart_turn", True), live=live,
+        smart_turn=getattr(settings, "smart_turn", True), live=live, on_speech=on_speech,
     )
 
 
@@ -733,6 +740,21 @@ def _offer_recap(session: ServerSession, settings, game: str, barge: "BargeInWat
     return None
 
 
+def _game_context_field(game: str) -> dict | None:
+    """`turn_start.game_context` for session.ask(): the edition, version and
+    own language of the game behind the last matched window
+    (client/game_context.py), None when the question's game is not that
+    window's (picked by hand, named by voice) or has no reader. Never raises:
+    a slip here must not cost the question."""
+    try:
+        proc = capture.last_game_process()
+        if not proc or proc[0] != game:
+            return None
+        return game_context.context_for(game, proc[1], proc[2], capture.last_game_title())
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _guide_field() -> dict:
     """`turn_start.guide` for session.ask(): {} while the pane is closed (so
     "quero construir uma casa" can start it), {"list": True} while it lists
@@ -745,11 +767,55 @@ def _guide_field() -> dict:
     return {}
 
 
+def _visual_field() -> dict | None:
+    """`turn_start.visual` for session.ask(): the in-game pane's state as the
+    UI last reported it (open, kind, index/count, pinned, title, query, style,
+    the guide), None before the UI ever said. net.py sends it only when the
+    server advertises "visual"."""
+    if not _PANE:
+        return None
+    return {k: _PANE[k] for k in PANE_STATE_KEYS if k in _PANE}
+
+
+def _apply_visual_message(body: dict) -> None:
+    """A `visual` message from the server (inside an ask turn): pictures for
+    the in-game pane, or a command on it. The pane keeps the state and
+    answers with "pane_state:"; nothing to mirror here beyond the telemetry
+    line (the items' bytes never go anywhere but the UI)."""
+    action = str(body.get("action") or ("open" if body.get("items") else "")) or "-"
+    items = body.get("items") if isinstance(body.get("items"), list) else []
+    telemetry(f"  [painel] {action} · {len(items)} imagem(ns) · índice {body.get('index', '-')}")
+    _UI.visual(body)
+
+
+def _pane_command(cmd: str) -> None:
+    """The in-game pane's own commands. "pane_state:<json>" is what it shows
+    now (a click, a message, a fold). "pane_hidden:fullscreen": it opened
+    while a game owns the display in exclusive fullscreen, where no window
+    of ours can show - say so once, honestly, instead of failing silently."""
+    if cmd.startswith("pane_state:"):
+        try:
+            state = json.loads(cmd.removeprefix("pane_state:"))
+        except ValueError:
+            return
+        if isinstance(state, dict):
+            _PANE.clear()
+            _PANE.update({k: v for k, v in state.items() if k in PANE_STATE_KEYS})
+        return
+    if cmd == "pane_hidden:fullscreen":
+        print(t("attention", text=texts.spoken("pane_fullscreen")))
+        threading.Thread(target=play_line, args=("pane_fullscreen", _voice), kwargs={"fallback_tone": False},
+                         name="pane-fullscreen-line", daemon=True).start()
+
+
 def _apply_guide_message(body: dict) -> None:
     """A `guide` message - the server's (inside an ask turn) or one built here
     from a REST click-open: the pane gets it, and the mirror follows at once,
     so a second command before the pane answers back still carries the right
-    layer."""
+    layer. The step's real screenshot (`shot`, server/build_shots.py) is
+    remembered here too, and an `open` starts the fetch of the build's other
+    pictures (the icons of its blocks, the shots of its other steps) so the
+    pane's own clicks have them without a turn."""
     action = body.get("action")
     if action in ("open", "layer"):
         try:
@@ -757,6 +823,9 @@ def _apply_guide_message(body: dict) -> None:
         except (TypeError, ValueError):
             layer = 1
         _GUIDE.update(id=str(body.get("id") or "") or None, layer=layer, list=False)
+        build_assets.remember_message_shot(body)
+        if action == "open":
+            _fetch_guide_assets(body)
     elif action == "close":
         _GUIDE.update(id=None, layer=0, list=False)
     elif action == "list":
@@ -769,6 +838,38 @@ def _apply_guide_message(body: dict) -> None:
         # answers with "guide_state:", which brings the mirror up to date.
         telemetry(f"  [guia] step {int(body.get('delta') or 0):+d} · {_GUIDE['id'] or '-'} · camada {_GUIDE['layer'] or '-'}")
     _UI.guide(body)
+
+
+def _fetch_guide_assets(body: dict) -> None:
+    """After a guide `open`: the chips' icons (this PC's cache first, then the
+    server) and the real screenshots of the steps the server says it has
+    (`shots`: {layers, angles}), each sent to the UI as it lands
+    (`guide_assets` messages). On its own thread; stops when the guide is no
+    longer the open one; a slow or old server (no "build_shots") just means
+    the grid and colour squares, as before."""
+    session = _SESSION
+    guide_id = str(body.get("id") or "")
+    build = body.get("build") if isinstance(body.get("build"), dict) else {}
+    ids = build_assets.icon_ids(build)
+    have, missing = build_assets.icons_split(ids)
+    if have:
+        _UI.guide_assets(guide_id, icons=have)
+    names = build_assets.shot_names(body.get("shots"), int(body.get("layers") or 0))
+    cached = build_assets.shots_have(guide_id, names)
+    if cached:
+        _UI.guide_assets(guide_id, shots=cached)
+    if session is None or not session.supports("build_shots") or not (missing or names):
+        return
+
+    def work() -> None:
+        if missing:
+            got = build_assets.icons_fetch(session, missing)
+            if got:
+                _UI.guide_assets(guide_id, icons=got)
+        build_assets.shots_fetch(session, guide_id, names, on_each=lambda name, b64: _UI.guide_assets(guide_id, shots={name: b64}),
+                                 still_wanted=lambda: _GUIDE["id"] == guide_id)
+
+    threading.Thread(target=work, name="guide-assets", daemon=True).start()
 
 
 def _guide_by_voice(command: str | None) -> str | None:
@@ -821,7 +922,8 @@ def _guide_command(cmd: str) -> None:
                 if session is None:
                     raise ServerError("offline")
                 data = session.get_build_guide(cmd.removeprefix("guide_open:")[:64], language)
-                body = {k: data[k] for k in ("id", "name", "layers", "materials", "build", "materials_by_layer", "hints")
+                body = {k: data[k] for k in ("id", "name", "layers", "materials", "build", "materials_by_layer", "hints",
+                                             "shot", "shots")
                         if k in data}
                 _apply_guide_message({"action": "open", "command": "click", "layer": 1, **body})
         except ServerError as exc:
@@ -829,6 +931,26 @@ def _guide_command(cmd: str) -> None:
             _UI.guide({"action": "error", "error": str(exc)})
 
     threading.Thread(target=work, name="guide-rest", daemon=True).start()
+
+
+def _show_recipe(card: dict) -> None:
+    """The brewing strip's card: to the window now, with the icons this PC
+    already has (client/brewing_icons.py); the missing ones are fetched on
+    their own thread and sent after, so a slow server never holds the strip."""
+    have, missing = brewing_icons.split(card)
+    _UI.recipe(card, have)
+    if not missing:
+        return
+    session = _SESSION
+
+    def work() -> None:
+        got = brewing_icons.fetch(session, missing)
+        if got:
+            _UI.recipe_icons(got)
+        else:
+            telemetry(f"  (ícones da poção indisponíveis: {', '.join(missing)})")
+
+    threading.Thread(target=work, name="brewing-icons", daemon=True).start()
 
 
 def _notes_command(cmd: str) -> None:
@@ -1197,6 +1319,8 @@ def cmd_ask(_args: argparse.Namespace) -> int:
         screenshot = None
         no_screen_reason = ""  # why there is no picture, told to the answer
         wav = None
+        turn_id = uuid.uuid4().hex  # before the capture: the frame can travel ahead of the question under it
+        early = None  # the frame sent at the first spoken word (client/net.py EarlyFrame), when it was
         if used_trigger:
             print(t("capturing"))
             screenshot, no_screen_reason = _capture_for_turn(settings)
@@ -1218,7 +1342,12 @@ def cmd_ask(_args: argparse.Namespace) -> int:
                 _UI.state("ouvindo")
                 own_ears = own_voice.settings_for("ears")  # the player's own key: our STT never hears it
                 live = None if own_ears else _live(session, settings)
-                wav = _record(settings, live)
+                # The picture goes to the server at the first word (2026-11-26), so its
+                # 4-5 s screen read runs while the player talks; the question then only
+                # says the frame is there. A silent take sends nothing; a server that
+                # doesn't know the message (None here) gets the frame with the question.
+                early = session.early_frame(turn_id, game, screenshot)
+                wav = _record(settings, live, on_speech=early.send if early is not None else None)
                 live_id = _live_result(live, wav)
                 _UI.state("pensando" if wav else "idle")
                 if wav and own_ears:
@@ -1240,12 +1369,13 @@ def cmd_ask(_args: argparse.Namespace) -> int:
             question_text = spoken_text
 
         if not wav and not question_text:
+            if early is not None:
+                early.cancel()  # words were heard but nothing came of them: the server drops the read
             print(t("empty_question"))
             continue
 
         t_sent = time.perf_counter()  # recording done (silence hang included) -> request goes out
         t_first_heard: float | None = None
-        turn_id = uuid.uuid4().hex
         cancel = threading.Event()
         audio_out = AudioOut()
         try:
@@ -1309,7 +1439,15 @@ def cmd_ask(_args: argparse.Namespace) -> int:
                 speaker.say(piece)
 
         def on_cards(cards: list) -> None:
-            turn_cards[:] = cards
+            # A "recipe" card (the brewing strip, server/brewing.py) comes right
+            # after the question and goes to the window at once; the link cards
+            # come just before the result and wait for the answer, as before.
+            recipes = [c for c in cards if isinstance(c, dict) and c.get("kind") == "recipe"]
+            links = [c for c in cards if not (isinstance(c, dict) and c.get("kind") == "recipe")]
+            if links or not recipes:
+                turn_cards[:] = links
+            if recipes:
+                _show_recipe(recipes[0])
 
         def on_audio(pcm: bytes, _turn_seq: int) -> None:
             nonlocal answer_audio_started, t_first_heard
@@ -1344,6 +1482,9 @@ def cmd_ask(_args: argparse.Namespace) -> int:
                 cancel=cancel, on_state=on_state, on_meta=on_meta, on_text=on_text, on_cards=on_cards, on_audio=on_audio,
                 on_usage=_UI.usage, play_history=history_sent, play_history_unasked=play_history.unasked(),
                 guide=_guide_field(), on_guide=_apply_guide_message,
+                game_context=_game_context_field(game),
+                visual=_visual_field(), on_visual=_apply_visual_message,
+                early_frame=early,
             )
         except ServerError as exc:
             print(t("error", error=exc))
@@ -1582,6 +1723,8 @@ def _on_ui_command(cmd: str) -> None:
         _games_command()
     elif cmd.startswith(("guide_state:", "guide_list:", "guide_open:")):
         _guide_command(cmd)  # the Build pane (client/gui/build_pane.py)
+    elif cmd.startswith(("pane_state:", "pane_hidden:")):
+        _pane_command(cmd)  # the in-game pane (client/gui/game_pane.py)
 
 
 def _after_pick(detected: str | None, pick_shadow: str | None) -> tuple[str | None, str | None]:

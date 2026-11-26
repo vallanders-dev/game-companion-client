@@ -905,11 +905,11 @@ def remember_game_for_foreground(name: str) -> Path | None:
 # alive - never whether it has focus, so alt-tabbing to Discord or a browser
 # mid-play is not "the game is gone". Set by `_match_foreground_window()` on
 # every match; read by main.py's recap trigger.
-_LAST_GAME_PROCESS: dict = {"game": None, "pid": None, "exe": None}
+_LAST_GAME_PROCESS: dict = {"game": None, "pid": None, "exe": None, "title": ""}
 
 
-def _note_game_process(game: str, pid: int, exe_path: Path | None) -> None:
-    _LAST_GAME_PROCESS.update(game=game, pid=pid, exe=exe_path)
+def _note_game_process(game: str, pid: int, exe_path: Path | None, title: str = "") -> None:
+    _LAST_GAME_PROCESS.update(game=game, pid=pid, exe=exe_path, title=title)
 
 
 def last_game_process() -> tuple[str, int, Path | None] | None:
@@ -917,6 +917,13 @@ def last_game_process() -> tuple[str, int, Path | None] | None:
     None before the first match."""
     g = _LAST_GAME_PROCESS
     return (g["game"], g["pid"], g["exe"]) if g["game"] and g["pid"] else None
+
+
+def last_game_title() -> str:
+    """The window title of that same match ("Minecraft* 26.3 - Singleplayer"):
+    the Java game writes its version there, which client/game_context.py uses
+    when the process's own command line cannot be read. "" before a match."""
+    return _LAST_GAME_PROCESS["title"] or ""
 
 
 def game_process_alive(pid: int | None, exe_path: Path | None) -> bool:
@@ -963,7 +970,8 @@ def _match_foreground_window(aliases_path: Path) -> tuple[int, str] | None:
         return None
 
     def hit(matched: str) -> tuple[int, str]:
-        _note_game_process(matched, pid, exe_path)  # the recap trigger watches this process
+        # the recap trigger watches this process; game_context reads it (edition, version)
+        _note_game_process(matched, pid, exe_path, title)
         return (hwnd, matched)
 
     aliases = load_game_aliases(aliases_path)

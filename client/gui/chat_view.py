@@ -26,6 +26,12 @@ A turn's life:
 Memory only for the turns: CLAUDE.md, nothing on disk links a question to a
 player. Cards open only on a left click, only http(s), through `open_url()`
 (module-level so a test can replace it).
+
+Three contextual hints (client/gui/hints.py, the app-wide pass of
+2026-11-25) along the bottom of the conversation, over the last panel and
+above the input: `chat_links` when the first link card lands, `chat_repeat`
+when a spoken answer ends, `note_recall` when a note is kept. `coach` is the
+window's shared Hints (one hints.json); on its own the view counts in memory.
 """
 from __future__ import annotations
 
@@ -37,14 +43,15 @@ from urllib.parse import urlsplit
 
 from PySide6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
-    QBrush, QColor, QFont, QFontMetrics, QGuiApplication, QLinearGradient, QPainter, QPainterPath, QPen,
+    QBrush, QColor, QFont, QFontMetrics, QGuiApplication, QImage, QLinearGradient, QPainter, QPainterPath, QPen,
+    QPixmap,
 )
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QScrollArea,
     QSizePolicy, QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from client.gui import indicator, motion
+from client.gui import hints as hints_mod, indicator, motion
 from client.gui.fonts import BODY_FAMILY, HEADING_FAMILY
 from client.gui.ui_texts import ui
 from client.gui.widgets import ACCENT, CONTROL, OK_GREEN, TEXT, TEXT_2, TEXT_3, _label, line_icon
@@ -92,6 +99,25 @@ def clean_card(raw) -> dict | None:
     thumb = str(raw.get("thumb") or "").strip()
     return {"kind": kind if kind in CARD_KINDS else "link", "url": url, "title": title, "site": site,
             "thumb": thumb if urlsplit(thumb).scheme in ("http", "https") else ""}
+
+
+def visual_card(item: dict) -> dict:
+    """The chat's card for a picture the in-game pane showed (client/gui/game_pane.py
+    `visual_shown`): kind "image", the title, the site and creator as the
+    meta line, the source page as the URL when it is http(s) - an item with
+    no source page is a card that opens nothing (the thumbnail is the point)."""
+    url = str(item.get("source_url") or "").strip()
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        url = ""
+    site = " ".join(str(item.get("site") or "").split())
+    author = " ".join(str(item.get("author") or "").split())
+    meta = " · ".join(x for x in (site, author) if x)
+    title = " ".join(str(item.get("title") or "").split()) or "…"
+    view = " ".join(str(item.get("view") or "").split())  # one angle of a build with real shots: "casa inicial · frente"
+    if view:
+        title += f" · {view}"
+    return {"kind": "image", "url": url, "title": title, "site": meta, "thumb": ""}
 
 
 # ---------------------------------------------------------------------- painting
@@ -383,14 +409,17 @@ class ChatCard(Panel):
     """One card under an answer: the kind's icon, the title and the site. A
     left click opens the URL in the browser; nothing happens before that."""
 
-    def __init__(self, card: dict, lang: str) -> None:
-        super().__init__(hover=True, fill="#111318", radius=10)
+    def __init__(self, card: dict, lang: str, thumb: QImage | None = None) -> None:
+        super().__init__(hover=bool(card["url"]), fill="#111318", radius=10)
         self.setObjectName("chatlink")  # painted by Panel; no style-sheet frame
         self.card = card
         self.url: str = card["url"]
         self.kind: str = card["kind"]
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip(f"{ui(lang, 'chat_card_open')}\n{self.url}")
+        if self.url:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.setToolTip(f"{ui(lang, 'chat_card_open')}\n{self.url}")
+        else:
+            self.setToolTip(card["title"])
         self.setFixedHeight(64 + SHADOW_PAD * 2)
         row = QHBoxLayout(self)
         row.setContentsMargins(SHADOW_PAD + 10, SHADOW_PAD + 6, SHADOW_PAD + 12, SHADOW_PAD + 8)
@@ -400,9 +429,29 @@ class ChatCard(Panel):
         self.thumb.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         self.thumb.setFixedSize(40, 40)
         icon = QLabel(self.thumb)
-        color = ACCENT if self.kind == "video" else OK_GREEN
-        icon.setPixmap(line_icon("play" if self.kind == "video" else self.kind, color, 20).pixmap(20, 20))
-        icon.setGeometry(10, 10, 20, 20)
+        if thumb is not None and not thumb.isNull():
+            # the picture itself (the in-game pane's mirror), cropped to the square, rounded
+            side = min(thumb.width(), thumb.height())
+            square = thumb.copy((thumb.width() - side) // 2, (thumb.height() - side) // 2, side, side)
+            pm = QPixmap.fromImage(square.scaled(80, 80, Qt.AspectRatioMode.IgnoreAspectRatio,
+                                                 Qt.TransformationMode.SmoothTransformation))
+            rounded = QPixmap(80, 80)
+            rounded.fill(Qt.GlobalColor.transparent)
+            q = QPainter(rounded)
+            q.setRenderHint(QPainter.RenderHint.Antialiasing)
+            path = QPainterPath()
+            path.addRoundedRect(QRectF(0, 0, 80, 80), 16, 16)
+            q.setClipPath(path)
+            q.drawPixmap(0, 0, pm)
+            q.end()
+            rounded.setDevicePixelRatio(2)
+            icon.setPixmap(rounded)
+            icon.setGeometry(0, 0, 40, 40)
+            self.thumb.setStyleSheet("background: transparent;")
+        else:
+            color = ACCENT if self.kind == "video" else OK_GREEN
+            icon.setPixmap(line_icon("play" if self.kind == "video" else self.kind, color, 20).pixmap(20, 20))
+            icon.setGeometry(10, 10, 20, 20)
         row.addWidget(self.thumb, 0, Qt.AlignmentFlag.AlignVCenter)
         col = QVBoxLayout()
         col.setSpacing(2)
@@ -421,9 +470,10 @@ class ChatCard(Panel):
         col.addWidget(self.site)
         col.addStretch(1)
         row.addLayout(col, 1)
-        ext = QLabel()
-        ext.setPixmap(line_icon("link", TEXT_3, 14).pixmap(14, 14))
-        row.addWidget(ext, 0, Qt.AlignmentFlag.AlignVCenter)
+        if self.url:
+            ext = QLabel()
+            ext.setPixmap(line_icon("link", TEXT_3, 14).pixmap(14, 14))
+            row.addWidget(ext, 0, Qt.AlignmentFlag.AlignVCenter)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - a plain left click, released on the card
         if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
@@ -431,6 +481,8 @@ class ChatCard(Panel):
         super().mouseReleaseEvent(event)
 
     def activate(self) -> None:
+        if not self.url:
+            return
         try:
             open_url(self.url)
         except Exception as exc:  # noqa: BLE001 - no browser is not a reason to lose the chat
@@ -519,6 +571,14 @@ class ChatTurn(QWidget):
         self.answer.setStyleSheet(f"font-size: 14px; color: {TEXT};")
         self.answer.hide()
         a.addWidget(self.answer)
+        # the brewing strip (client/gui/recipe_strip.py): part of the answer, it stays here
+        self.recipe_host = QWidget()
+        self.recipe_row = QHBoxLayout(self.recipe_host)
+        self.recipe_row.setContentsMargins(30, 2, 0, 2)
+        self.recipe_row.setSpacing(0)
+        self.recipe_host.hide()
+        self.recipe: dict | None = None
+        a.addWidget(self.recipe_host)
         self.cards_host = QWidget()
         self.cards_grid = QGridLayout(self.cards_host)
         self.cards_grid.setContentsMargins(28, 2, 0, 0)
@@ -688,8 +748,46 @@ class ChatTurn(QWidget):
             motion.fade_in(w, delay=i * motion.STAGGER)
         self.cards_host.setVisible(bool(self.cards))
 
+    def add_card(self, card: dict, thumb: QImage | None = None) -> None:
+        """One more card under this answer (the in-game pane's mirror of a
+        picture it showed), after the ones the server sent."""
+        i = len(self.cards)
+        self.cards.append(card)
+        w = ChatCard(card, self.lang, thumb)
+        self.cards_grid.addWidget(w, i // CARD_COLUMNS, i % CARD_COLUMNS)
+        motion.fade_in(w)
+        self.cards_host.show()
+        if self.answer_card.isHidden():
+            self.answer_card.show()
+
     def card_widgets(self) -> list[ChatCard]:
         return [w for w in self.cards_host.findChildren(ChatCard)]
+
+    def set_recipe(self, card: dict) -> None:
+        """The brewing strip under the answer (one per turn; a second card
+        replaces the first). The panel shows at once, before the answer's
+        first word, as the strip arrives right after the question."""
+        from client.gui.recipe_strip import RecipeStrip
+
+        while self.recipe_row.count():
+            widget = self.recipe_row.takeAt(0).widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        self.recipe = card
+        strip = RecipeStrip(card, glass=False, max_w=CHAT_W - 2 * SHADOW_PAD - 60)
+        self.recipe_row.addWidget(strip, 0, Qt.AlignmentFlag.AlignLeft)
+        self.recipe_row.addStretch(1)
+        self.recipe_host.show()
+        if self.answer_card.isHidden():
+            self.answer_card.show()
+        motion.fade_in(strip)
+
+    def recipe_widget(self):
+        from client.gui.recipe_strip import RecipeStrip
+
+        found = self.recipe_host.findChildren(RecipeStrip)
+        return found[0] if found else None
 
 
 # ---------------------------------------------------------------------- the list host (paints the glow)
@@ -1328,6 +1426,7 @@ class ChatView(QWidget):
         self.turns: list[ChatTurn] = []
         self._follow = True
         self._links_count = 0
+        self.coach = hints_mod.Hints()  # the window swaps in its shared one
         col = QVBoxLayout(self)
         col.setContentsMargins(0, 0, 0, 0)
         col.setSpacing(0)
@@ -1530,6 +1629,10 @@ class ChatView(QWidget):
             last.show_note_result(outcome == "note_saved")
         if not last.finished:
             last.finish("note" if note and last.note_row.layout() is not None else outcome)
+        if outcome == "note_saved":
+            self._teach("note_recall")
+        elif outcome == "answered" and last.answer_text:  # spoken (a typed turn ends answered_no_audio)
+            self._teach("chat_repeat")
 
     def ask_confirm(self, note: str) -> None:
         turn = self._current()
@@ -1564,6 +1667,38 @@ class ChatView(QWidget):
             return
         self._current().set_cards(clean)
         self._after_growth()
+        self._teach("chat_links")
+
+    def _teach(self, hint_id: str) -> bool:
+        """A hint along the bottom of the conversation - only while the
+        player can see it (the view shown, the Conversa tab in front)."""
+        # closed, the chat is clipped to nothing beside the home column, not hidden: ask for the region
+        if self.visibleRegion().isEmpty() or self.pages.currentIndex() != 0 or self.body.currentWidget() is not self.scroll:
+            return False
+        return self.coach.show(hint_id, self.body, self.lang, ask=self.keys.get("ask", ""))
+
+    def add_visual(self, item: dict, image: QImage | None) -> dict:
+        """A picture the in-game pane showed (client/gui/game_pane.py): a card
+        with its thumbnail and source under the newest answer - the pane is a
+        view of the conversation, never a second one. Returns the card."""
+        card = visual_card(item)
+        self._current().add_card(card, image)
+        self._after_growth()
+        return card
+
+    def set_recipe(self, card: dict) -> None:
+        """The brewing strip (a `recipe` card, already cleaned by the window)
+        under the newest answer."""
+        if not isinstance(card, dict) or not card.get("steps"):
+            return
+        self._current().set_recipe(card)
+        self._after_growth()
+
+    def refresh_recipe_icons(self) -> None:
+        for turn in self.turns:
+            strip = turn.recipe_widget() if turn.recipe is not None else None
+            if strip is not None:
+                strip.refresh_icons()
 
     def _after_growth(self) -> None:
         if self._follow:

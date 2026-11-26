@@ -16,5 +16,6 @@
   "sample": "¡Hola! Soy Ombri. Solo presiona F8 y pregúntame lo que quieras sobre tu juego.",
   "no_notes": "Ahora mismo no tengo una respuesta confiable para eso. Prueba preguntarlo de otra forma, o cuéntame la respuesta con F6 y la recuerdo para la próxima.",
   "closing_ack": "¡Perfecto! Cualquier cosa, me llamas.",
-  "ack": "¿Sí?"
+  "ack": "¿Sí?",
+  "pane_fullscreen": "El juego está en pantalla completa exclusiva, así que Windows no me deja mostrar el panel encima. En ventana o pantalla completa sin bordes sí aparece."
 }

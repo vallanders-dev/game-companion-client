@@ -79,6 +79,16 @@ showed (a dashed coral ring; since 2026-11-14 the main window's quieter thin rin
 broken (the game's own HWND_TOPMOST window covered the orb) and is fixed
 by _reassert_topmost() - confirmed live 2026-09-23. A game that takes
 the display in true exclusive mode would still hide any window.
+
+2026-11-24: the in-game pane (client/gui/game_pane.py) is a second top-level
+window with exactly this window's behaviour, so the Win32 pieces are module
+functions now (`apply_noactivate`, `apply_corner_rounding`,
+`apply_capture_exclusion`, `reassert_topmost`, `set_native_click_through`)
+and the methods below call them. The orb tells the pane where it is
+(`orb_centre_global()`, `moved`), when it was clicked without a drag
+(`clicked`: the folded pane comes back) and when click-through toggled
+(`click_through_changed`: the pane follows). A remembered `position` (the
+pane's layout file) puts the orb back where the player left it.
 """
 
 from __future__ import annotations
@@ -90,7 +100,7 @@ import sys
 
 from enum import Enum
 
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QRect, QRectF, QTimer, Qt
+from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRect, QRectF, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -232,6 +242,111 @@ def _set_ex_style(hwnd: ctypes.c_void_p, value: int) -> None:
     user32.SetWindowLongPtrW(hwnd, _GWL_EXSTYLE, ctypes.c_longlong(value))
 
 
+def _hwnd(widget: QWidget) -> ctypes.c_void_p:
+    return ctypes.c_void_p(int(widget.winId()))
+
+
+def apply_noactivate(widget: QWidget) -> None:
+    """WA_ShowWithoutActivating + NoFocus block keyboard FOCUS, not OS
+    foreground ACTIVATION - confirmed live (2026-09-19) that a click on the
+    window was still activating it, which pauses the game underneath.
+    WS_EX_NOACTIVATE is the real fix; there's no Qt-level attribute for it.
+    One-time, silent on failure - never raise or leave a broken window."""
+    if sys.platform != "win32":
+        return
+    try:
+        hwnd = _hwnd(widget)
+        _set_ex_style(hwnd, _get_ex_style(hwnd) | _WS_EX_NOACTIVATE)
+    except (OSError, AttributeError, ValueError):
+        pass
+
+
+def apply_corner_rounding(widget: QWidget) -> None:
+    """Best-effort DwmSetWindowAttribute: DONOTROUND, and no border - Windows
+    11 drew ROUND as a grey rounded box with a shadow around the orb (Tony,
+    2026-11-23). Any failure (older Windows, dwmapi missing) just leaves the
+    window's own rectangular corners, which sit outside the painted shape."""
+    if sys.platform != "win32":
+        return
+    try:
+        hwnd = _hwnd(widget)
+        dwmapi = ctypes.WinDLL("dwmapi")
+        DWMWA_WINDOW_CORNER_PREFERENCE = 33
+        DWMWCP_DONOTROUND = 1
+        corner = ctypes.c_int(DWMWCP_DONOTROUND)
+        dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ctypes.byref(corner), ctypes.sizeof(corner))
+        DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE = 34, 0xFFFFFFFE
+        border = ctypes.c_uint(DWMWA_COLOR_NONE)
+        dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, ctypes.byref(border), ctypes.sizeof(border))
+    except (OSError, AttributeError, ValueError):
+        pass
+
+
+def apply_capture_exclusion(widget: QWidget) -> None:
+    """Visible in recordings or not (setting "Mostrar o Ombri em gravações e
+    lives", default ON since 2026-10-13). Until then the orb always used
+    WDA_EXCLUDEFROMCAPTURE, which hid it from EVERY capture - OBS, Game Bar,
+    Discord - not just from the screenshot sent to Kimi, so demos and streams
+    couldn't show Ombri working. The Kimi screenshot is now kept clean by
+    capture.py painting Ombri's windows black (`_mask_own_windows()`),
+    whatever this setting says. Re-read on the topmost timer, so a change in
+    the settings window applies within a few seconds. While a game with an
+    anti-cheat is in front (client/anticheat_games.py) the window is always
+    shown in captures, setting or not: hiding a topmost window from capture
+    is what cheat overlays do (2026-11-20). Silent on failure."""
+    if sys.platform != "win32":
+        return
+    show = capture_allowed_to_see_orb()
+    if show == getattr(widget, "_shown_in_capture", None):
+        return
+    try:
+        WDA_NONE, WDA_EXCLUDEFROMCAPTURE = 0x00000000, 0x00000011
+        user32 = ctypes.WinDLL("user32")
+        user32.SetWindowDisplayAffinity(_hwnd(widget), WDA_NONE if show else WDA_EXCLUDEFROMCAPTURE)
+        widget._shown_in_capture = show
+    except (OSError, AttributeError, ValueError):
+        pass
+
+
+def reassert_topmost(widget: QWidget) -> None:
+    """Back to the top of the topmost windows without activating anything
+    (fullscreen games claim HWND_TOPMOST too; the most recent one wins)."""
+    if sys.platform != "win32" or not widget.isVisible():
+        return
+    apply_capture_exclusion(widget)  # cheap when the setting didn't change
+    try:
+        HWND_TOPMOST = ctypes.c_void_p(-1)
+        SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE, SWP_NOOWNERZORDER = 0x1, 0x2, 0x10, 0x200
+        user32 = ctypes.WinDLL("user32")
+        user32.SetWindowPos.argtypes = [
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint,
+        ]
+        user32.SetWindowPos(_hwnd(widget), HWND_TOPMOST, 0, 0, 0, 0,
+                            SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER)
+    except (OSError, AttributeError, ValueError):
+        pass
+
+
+def set_native_click_through(widget: QWidget, enabled: bool) -> None:
+    """WS_EX_TRANSPARENT set directly: Qt's WA_TransparentForMouseEvents never
+    reaches the native style on a runtime toggle of this kind of window."""
+    if sys.platform != "win32":
+        return
+    try:
+        hwnd = _hwnd(widget)
+        current = _get_ex_style(hwnd)
+        _set_ex_style(hwnd, (current | _WS_EX_TRANSPARENT) if enabled else (current & ~_WS_EX_TRANSPARENT))
+    except (OSError, AttributeError, ValueError):
+        pass
+
+
+def native_transparent_bit(widget: QWidget) -> bool:
+    try:
+        return bool(_get_ex_style(_hwnd(widget)) & _WS_EX_TRANSPARENT)
+    except (OSError, AttributeError, ValueError):
+        return False
+
+
 def _parse_color(value: str) -> QColor:
     """Accepts either `rgba(r, g, b, a)` or a plain hex/name color."""
     match = _RGBA_RE.match(value.strip())
@@ -253,8 +368,14 @@ class OverlayWindow(QWidget):
     here was removed, not just hidden."""
 
     SHADOW_MARGIN = 20  # transparent bleed around the painted orb, for the glow's own falloff to fade into
+    DRAG_SLOP = 4  # px: a press released closer than this is a click, not a drag
 
-    def __init__(self, theme: Theme = DARK_THEME, parent: QWidget | None = None) -> None:
+    moved = Signal()  # a left-drag ended somewhere else (the in-game pane anchors here)
+    clicked = Signal()  # a press and release without a drag (the folded pane comes back)
+    click_through_changed = Signal(bool)  # Scroll Lock toggled it (the pane follows)
+
+    def __init__(self, theme: Theme = DARK_THEME, parent: QWidget | None = None,
+                 position: tuple[int, int] | None = None) -> None:
         super().__init__(parent)
 
         self.theme = theme
@@ -263,6 +384,8 @@ class OverlayWindow(QWidget):
         self._native_setup_done = False
         self._click_through = False
         self._drag_offset = None
+        self._press_pos: QPoint | None = None
+        self._dragged = False
         self._presence_tier = "ativo"  # "ativo" | "repouso" | "ausente"
         self._anim_phase = 0.0  # seconds, free-running - drives the orb's breathing/pulse/swirl (2026-09-25)
 
@@ -280,6 +403,11 @@ class OverlayWindow(QWidget):
         diameter, margin = _footprint()
         orb_footprint = int(round(diameter + 2 * margin))
         self.setGeometry(self._initial_geometry(orb_footprint, orb_footprint))
+        if position is not None:
+            # Where the player left it last time (client/gui/pane_store.py), if that is still on a screen.
+            rect = QRect(QPoint(int(position[0]), int(position[1])), self.size())
+            if any(sc.availableGeometry().intersects(rect) for sc in QApplication.screens()):
+                self.move(rect.topLeft())
 
         self._repouso_timer = QTimer(self)
         self._repouso_timer.setSingleShot(True)
@@ -313,22 +441,28 @@ class OverlayWindow(QWidget):
         self.update()
 
     def _reassert_topmost(self) -> None:
-        if sys.platform != "win32" or not self.isVisible():
-            return
-        self._apply_capture_exclusion()  # cheap when the setting didn't change
-        try:
-            HWND_TOPMOST = ctypes.c_void_p(-1)
-            SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE, SWP_NOOWNERZORDER = 0x1, 0x2, 0x10, 0x200
-            user32 = ctypes.WinDLL("user32")
-            user32.SetWindowPos.argtypes = [
-                ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint,
-            ]
-            user32.SetWindowPos(
-                ctypes.c_void_p(int(self.winId())), HWND_TOPMOST, 0, 0, 0, 0,
-                SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
-            )
-        except (OSError, AttributeError, ValueError):
-            pass
+        reassert_topmost(self)
+
+    # ------------------------------------------------------------------ #
+    # Where the orb is (for the in-game pane, client/gui/game_pane.py)
+    # ------------------------------------------------------------------ #
+    def orb_centre_global(self) -> QPoint:
+        """The painted body's centre in screen coordinates (from the widget's
+        geometry: the native window lags behind while the orb is hidden)."""
+        return self.geometry().topLeft() + self.rect().center()
+
+    def orb_radius(self) -> float:
+        """The body's radius: the calm disc's (shadow), the eyes' tile, or the sphere."""
+        diameter, _m = _footprint()
+        if indicator.STYLE == "shadow":
+            return 0.36 * diameter  # draw_shadow(calm=True): a disc of 0.36 * box
+        if indicator.custom():
+            return diameter / 2
+        return float(ORB_SPHERE_RADIUS)
+
+    def place_at_centre(self, centre: QPoint) -> None:
+        """Moves the window so the body's centre is at `centre` (screen coordinates)."""
+        self.move(centre - self.rect().center())
 
     # ------------------------------------------------------------------ #
     # Public API (also what demo.py drives)
@@ -362,24 +496,17 @@ class OverlayWindow(QWidget):
         native = self._native_transparent_bit() if sys.platform == "win32" else None
         print(f"[overlay] clique-atravessa -> {enabled} (Qt attr={applied}, WS_EX_TRANSPARENT nativo={native})")
         self.update()
+        self.click_through_changed.emit(enabled)
+
+    @property
+    def click_through(self) -> bool:
+        return self._click_through
 
     def _apply_click_through_native(self, enabled: bool) -> None:
-        if sys.platform != "win32":
-            return
-        try:
-            hwnd = ctypes.c_void_p(int(self.winId()))
-            current = _get_ex_style(hwnd)
-            new_style = (current | _WS_EX_TRANSPARENT) if enabled else (current & ~_WS_EX_TRANSPARENT)
-            _set_ex_style(hwnd, new_style)
-        except (OSError, AttributeError, ValueError):
-            pass
+        set_native_click_through(self, enabled)
 
     def _native_transparent_bit(self) -> bool:
-        try:
-            hwnd = ctypes.c_void_p(int(self.winId()))
-            return bool(_get_ex_style(hwnd) & _WS_EX_TRANSPARENT)
-        except (OSError, AttributeError, ValueError):
-            return False
+        return native_transparent_bit(self)
 
     def debug_set_presence_tier(self, tier: str) -> None:
         """Dev/demo-only override — jumps straight to a presence tier's
@@ -447,71 +574,13 @@ class OverlayWindow(QWidget):
             self._apply_capture_exclusion()
 
     def _apply_capture_exclusion(self) -> None:
-        """Visible in recordings or not (setting "Mostrar o Ombri em gravações
-        e lives", default ON since 2026-10-13). Until then the orb always
-        used WDA_EXCLUDEFROMCAPTURE, which hid it from EVERY capture - OBS,
-        Game Bar, Discord - not just from the screenshot sent to Kimi, so
-        demos and streams couldn't show Ombri working. The Kimi screenshot is
-        now kept clean by capture.py painting Ombri's windows black
-        (`_mask_own_windows()`), whatever this setting says. Re-read on the
-        topmost timer, so a change in the settings window applies within a
-        few seconds. Silent on failure, like the other ctypes calls here."""
-        if sys.platform != "win32":
-            return
-        # While a game with an anti-cheat is in front (client/anticheat_games.py)
-        # the orb is always shown in captures, setting or not: hiding a topmost
-        # window from capture is what cheat overlays do (2026-11-20).
-        show = capture_allowed_to_see_orb()
-        if show == getattr(self, "_shown_in_capture", None):
-            return
-        try:
-            WDA_NONE, WDA_EXCLUDEFROMCAPTURE = 0x00000000, 0x00000011
-            hwnd = ctypes.c_void_p(int(self.winId()))
-            user32 = ctypes.WinDLL("user32")
-            user32.SetWindowDisplayAffinity(hwnd, WDA_NONE if show else WDA_EXCLUDEFROMCAPTURE)
-            self._shown_in_capture = show
-        except (OSError, AttributeError, ValueError):
-            pass
+        apply_capture_exclusion(self)
 
     def _apply_noactivate(self) -> None:
-        """WA_ShowWithoutActivating + NoFocus block keyboard FOCUS, not OS
-        foreground ACTIVATION - confirmed live (2026-09-19) that a click on
-        the window was still activating it, which pauses the game
-        underneath. WS_EX_NOACTIVATE is the real fix; there's no Qt-level
-        attribute for it. One-time, same silent-failure posture as the other
-        calls here - never raise or leave a broken window."""
-        if sys.platform != "win32":
-            return
-        try:
-            hwnd = ctypes.c_void_p(int(self.winId()))
-            current = _get_ex_style(hwnd)
-            _set_ex_style(hwnd, current | _WS_EX_NOACTIVATE)
-        except (OSError, AttributeError, ValueError):
-            pass
+        apply_noactivate(self)
 
     def _apply_corner_rounding(self) -> None:
-        """Best-effort native rounded corners via DwmSetWindowAttribute -
-        mostly moot for a circular orb, kept for the rare platform/theme
-        combination where the window's own square corners could otherwise
-        peek out. Must never raise or leave a broken window - any failure
-        (wrong Windows version, dwmapi missing) just leaves the window's
-        own rectangular corners, which sit outside the painted circle."""
-        if sys.platform != "win32":
-            return
-        try:
-            hwnd = ctypes.c_void_p(int(self.winId()))
-            dwmapi = ctypes.WinDLL("dwmapi")
-            DWMWA_WINDOW_CORNER_PREFERENCE = 33
-            # DONOTROUND, and no border: Windows 11 drew ROUND as a grey rounded
-            # box with a shadow around the orb (Tony, 2026-11-23).
-            DWMWCP_DONOTROUND = 1
-            corner = ctypes.c_int(DWMWCP_DONOTROUND)
-            dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ctypes.byref(corner), ctypes.sizeof(corner))
-            DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE = 34, 0xFFFFFFFE
-            border = ctypes.c_uint(DWMWA_COLOR_NONE)
-            dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, ctypes.byref(border), ctypes.sizeof(border))
-        except (OSError, AttributeError, ValueError):
-            pass
+        apply_corner_rounding(self)
 
     # ------------------------------------------------------------------ #
     # Painting
@@ -548,15 +617,28 @@ class OverlayWindow(QWidget):
     # ------------------------------------------------------------------ #
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            self._press_pos = event.globalPosition().toPoint()
+            self._dragged = False
+            self._drag_offset = self._press_pos - self.frameGeometry().topLeft()
             event.accept()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         if self._drag_offset is not None and event.buttons() & Qt.MouseButton.LeftButton:
-            self.move(event.globalPosition().toPoint() - self._drag_offset)
+            pos = event.globalPosition().toPoint()
+            if self._dragged or (pos - self._press_pos).manhattanLength() > self.DRAG_SLOP:
+                self._dragged = True
+                self.move(pos - self._drag_offset)
             event.accept()
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if self._drag_offset is not None and event.button() == Qt.MouseButton.LeftButton:
+            self._drag_offset = None
+            if self._dragged:
+                self.moved.emit()
+            else:
+                self.clicked.emit()
+            self._dragged = False
+            return
         self._drag_offset = None
 
     # ------------------------------------------------------------------ #

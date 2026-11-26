@@ -328,6 +328,7 @@ def record_until_silence(
     min_speech_onset: float = 0.0,
     smart_turn: bool = True,
     live=None,
+    on_speech=None,
 ) -> bytes | None:
     """Record the mic until it goes quiet, then return WAV bytes.
 
@@ -362,6 +363,12 @@ def record_until_silence(
     ``open_ended()`` (the words so far end mid-thought - ends_mid_thought()).
     While it works the waits are LIVE_* (30% shorter) and an open-ended take
     is held up to HOLD_SILENCE instead of being stopped.
+
+    ``on_speech`` (2026-11-26): called once, on the recording thread, the first
+    time a block counts as speech - before ``live`` sees it. The app sends the
+    F8 frame to the server there (client/net.py EarlyFrame), so the screen read
+    runs while the player talks; a silent take sends nothing. Whatever it
+    raises is swallowed: the recording never depends on it.
 
     Returns ``None`` (caller should fall back to typed input) when there is no
     usable input device, the stream errors, Silero VAD can't be loaded, or
@@ -456,6 +463,13 @@ def record_until_silence(
                     next_check = 0
                 else:
                     silence_run += _BLOCK_SECONDS
+
+                if speech_detected and on_speech is not None:
+                    hook, on_speech = on_speech, None  # once: the first block that counts as speech
+                    try:
+                        hook()
+                    except Exception:  # noqa: BLE001 - the frame is a bonus, never the recording
+                        pass
 
                 live_on = False
                 if live is not None:

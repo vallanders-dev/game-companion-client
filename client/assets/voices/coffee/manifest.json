@@ -16,5 +16,6 @@
   "already_running": "I'm already open in another window. Close that one before opening me again.",
   "sample": "Hey! I'm Ombri. Just press F8 and ask me anything about your game.",
   "no_notes": "I couldn't get a reliable answer for that right now. Try asking another way, or tell me the answer with F6 and I'll remember it next time.",
-  "closing_ack": "Sure thing! Just call me if you need anything."
+  "closing_ack": "Sure thing! Just call me if you need anything.",
+  "pane_fullscreen": "The game is in exclusive fullscreen, so Windows won't let me show the panel over it. In windowed or borderless fullscreen it shows up."
 }

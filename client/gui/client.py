@@ -217,9 +217,47 @@ class HudClient:
         if isinstance(body, dict) and body.get("action"):
             self._send({"type": "guide", **{k: v for k, v in body.items() if k != "type"}})
 
+    def guide_assets(self, guide_id: str, icons: dict | None = None, shots: dict | None = None) -> None:
+        """The Build pane's pictures as they land (client/build_assets.py,
+        2026-11-24): `icons` {block id: base64 PNG} for the chips, `shots`
+        {"layer_3" | "front" | ...: base64 JPEG} - the real screenshots of
+        `guide_id`'s steps and finished build. Sent several times per open."""
+        if guide_id and (icons or shots):
+            self._send({"type": "guide_assets", "id": str(guide_id), "icons": dict(icons or {}), "shots": dict(shots or {})})
+
     def chat_cards(self, cards: list[dict]) -> None:
         """Cards under the newest answer: [{kind, url, title, site, thumb}]."""
         self._send({"type": "chat_cards", "cards": [c for c in cards if isinstance(c, dict)]})
+
+    # -- the brewing strip (server/brewing.py, 2026-11-24) -------------------
+    def visual(self, body: dict) -> None:
+        """The server's `visual` message (client/gui/game_pane.py; the owner's
+        visual-pane brief, 2026-11-24): action "open" (items: image as base64,
+        title, site, author, source_url, kind "idea" | "step"; index; query;
+        style) | "index" | "pin" | "unpin" | "back" | "show" | "close". The
+        in-game pane keeps the state; the UI answers with "pane_state:<json>"
+        so the next turn_start.visual says what is on screen."""
+        if isinstance(body, dict) and (body.get("action") or body.get("items")):
+            self._send({"type": "visual", **{k: v for k, v in body.items() if k != "type"}})
+
+    def pane(self, action: str) -> None:
+        """The in-game pane itself, whatever it shows: "back" folds it into
+        the orb (content kept), "show" unfolds it, "close" closes it."""
+        if action in ("back", "show", "close"):
+            self._send({"type": "pane", "action": action})
+
+    def recipe(self, card: dict, icons: dict | None = None) -> None:
+        """A `recipe` card (kind "recipe": steps, result, modifiers) for the
+        strip on the Ombri view and under the answer in the chat. `icons`:
+        {icon id: base64 PNG} main.py already has in its cache; the rest
+        follow with recipe_icons() once fetched."""
+        if isinstance(card, dict) and card.get("kind") == "recipe":
+            self._send({"type": "recipe", "card": card, "icons": dict(icons or {})})
+
+    def recipe_icons(self, icons: dict) -> None:
+        """Icons fetched after the strip was shown: {icon id: base64 PNG}."""
+        if icons:
+            self._send({"type": "recipe_icons", "icons": dict(icons)})
 
     # -- the chat redesign (docs/chat_redesign.md, 2026-11-23) ---------------
     def chat_stage(self, stage: str) -> None:
