@@ -27,8 +27,9 @@ re-emits it (`guide_state_changed`) for main.py's next turn_start.
 
 Contextual hints (client/gui/hints.py, 2026-11-25): the window owns the
 shared `coach` (one hints.json with the in-game pane) and lends it to the
-chat. Its own three moments: the controller's tile on the home column
-(`pad_ask`), the brewing strip on the home column with the chat closed
+chat. Its own moments: the footer line's place, one at a time - the first
+game on the card at "Pronto" (`ask_screen`), then the controller's tile
+(`pad_ask`) -, the brewing strip on the home column with the chat closed
 (`recipe_in_chat`), "Minhas notas" with notes in it (`note_recall`).
 """
 from __future__ import annotations
@@ -262,9 +263,10 @@ VIEWS = ("ombri", "notes", "settings")  # the home column; the chat opens beside
 
 
 class _CloseWithStrip(QObject):
-    """Gives the footer line its text back when `pad_ask`'s strip hides
-    (timed out, ticked off, replaced). Owned by the footer, so it dies with
-    it: never a call into a deleted widget when the window goes."""
+    """Gives the footer line its text back when the footer-place hint's strip
+    (`ask_screen`, `pad_ask`) hides (timed out, ticked off, replaced). Owned
+    by the footer, so it dies with it: never a call into a deleted widget
+    when the window goes."""
 
     def __init__(self, owner: QWidget, on_close) -> None:
         super().__init__(owner)
@@ -336,8 +338,8 @@ class MainWindow(QWidget):
         self.notes_error = ""
         # the hints' shared store (client/gui/hints.py): the pane's folder, a scratch one in a test
         self.coach = hints_mod.Hints(store_dir if store_dir is not None else pane_store.default_dir())
-        self._taught: set[str] = set()  # home-column hints offered in this run (pad_ask: once per run)
-        self._footer_lent = False  # the footer line's place holds `pad_ask` (see _teach)
+        self._taught: set[str] = set()  # home-column hints offered in this run (the footer's: once per run)
+        self._footer_lent = False  # the footer line's place holds a hint (ask_screen / pad_ask, see _teach)
 
         root = QWidget(self)
         self.root = root
@@ -769,7 +771,7 @@ class MainWindow(QWidget):
         self.s_build.setText(ui(L, "guide_button"))
         self.s_build.setVisible(self.guide_enabled)
         self.w_settings.setText(ui(L, "settings"))
-        if not self._footer_lent:  # lent to `pad_ask`: the text comes back when the hint goes
+        if not self._footer_lent:  # lent to a hint (ask_screen / pad_ask): the text comes back when it goes
             self.s_footer.setText(ui(L, "footer"))
 
         self.w_title.setText(ui(L, "wait_title"))
@@ -809,27 +811,43 @@ class MainWindow(QWidget):
 
     def _teach(self) -> None:
         """The home column's own hints, each once per run at most (the store
-        keeps the budget across runs): `pad_ask` the first time the key tiles
-        carry the controller's combo while the status page is up. Never over
+        keeps the budget across runs), in the footer line's place: `ask_screen`
+        the first time a game is on the card and the state is "Pronto" (owner's
+        yes 2026-11-26: nothing on the window says the key sends a picture of
+        the screen), then `pad_ask` the next time the status page shows, when
+        the key tiles carry the controller's combo. One at a time. Never over
         the tiles' labels (owner, 2026-11-25), and the column has no spare
         height (a taller one squeezes the mascot under its "Pronto" or pushes
         the voice card off the window): it takes the footer line's place - a
         standing reminder - whose text comes back when the hint goes. Nothing
         moves."""
-        if "pad_ask" not in self._taught and self.keys.get("pad") and self._home_shown() and not self.recipe.active:
-            self._taught.add("pad_ask")
-            footer = self.s_footer
-            footer.setFixedHeight(footer.height())  # the place keeps its size without its text
-            footer.setText("")
-            self._footer_lent = True
-            if not self.coach.show("pad_ask", footer, self.lang, top=0, ask=self.keys["ask"], pad=self.keys["pad"]) \
-                    or self.coach.strip("pad_ask") is None:
-                self._give_footer_back()
-                return
-            strip = self.coach.strip("pad_ask")
-            strip.top = max(0, (footer.height() - strip.height()) // 2)  # centred in the footer's place
-            strip.place()
-            strip.installEventFilter(_CloseWithStrip(footer, self._give_footer_back))
+        if self._footer_lent or not self._home_shown() or self.recipe.active:
+            return
+        due = (("ask_screen", bool(self.game) and self.state == "idle"),
+               ("pad_ask", bool(self.keys.get("pad"))))
+        for hint_id, ready in due:
+            if hint_id in self._taught or not ready:
+                continue
+            self._taught.add(hint_id)
+            if self._lend_footer(hint_id):
+                return  # the next one waits for a later refresh (one hint at a time, never two in a row)
+
+    def _lend_footer(self, hint_id: str) -> bool:
+        """The hint in the footer line's place; False when the coach declined
+        (budget spent, ticked off, another hint just went up)."""
+        footer = self.s_footer
+        footer.setFixedHeight(footer.height())  # the place keeps its size without its text
+        footer.setText("")
+        self._footer_lent = True
+        if not self.coach.show(hint_id, footer, self.lang, top=0, ask=self.keys["ask"], pad=self.keys.get("pad") or "") \
+                or self.coach.strip(hint_id) is None:
+            self._give_footer_back()
+            return False
+        strip = self.coach.strip(hint_id)
+        strip.top = max(0, (footer.height() - strip.height()) // 2)  # centred in the footer's place
+        strip.place()
+        strip.installEventFilter(_CloseWithStrip(footer, self._give_footer_back))
+        return True
 
     def _give_footer_back(self) -> None:
         if not self._footer_lent:
@@ -1013,6 +1031,7 @@ class MainWindow(QWidget):
         if clean is None:
             return
         self.chat.set_recipe(clean)
+        self._place_recipe()  # the layer's height first: the strip is fitted to it
         self.recipe.show_recipe(clean)
         self._refresh()
         if self.recipe.isVisible() and not self.chat_open:

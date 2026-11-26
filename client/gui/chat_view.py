@@ -1566,6 +1566,8 @@ class ChatView(QWidget):
         turn = self._add_turn(text, self.game, typed=True)
         turn.set_stage("pensando")
         self.send_requested.emit(text, remember)
+        if not remember:  # a typed question goes without the screen (the key and the mic send it); a note needs none
+            self._teach("typed_no_screen")
 
     def add_question(self, text: str, game: str | None = None) -> ChatTurn | None:
         """The turn's question from the server (turn_meta). It fills a pending

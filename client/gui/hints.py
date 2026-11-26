@@ -13,11 +13,15 @@ after the pane's own three):
 - the in-game pane (client/gui/game_pane.py): pane_open, pane_step, pane_pin;
 - the chat (client/gui/chat_view.py): chat_links when the first link card
   lands, chat_repeat after the first spoken answer, note_recall when a note
-  is kept;
+  is kept, typed_no_screen when the first typed question goes (a typed turn
+  carries no picture of the screen; the key does);
 - the window (client/gui/main_window.py): note_recall again on "Minhas
   notas" (same id: one budget), recipe_in_chat when the brewing strip shows
-  on the home column with the chat closed, pad_ask when the controller's
-  tile is on the home column for the first time.
+  on the home column with the chat closed, and in the footer line's place,
+  one at a time: ask_screen the first time a game is on the card and the
+  state is "Pronto" (everyone: the screen is the product's trick and nothing
+  on the window says the key sends it), then pad_ask the next time the
+  status page shows (controller owners). Owner's yes to both, 2026-11-26.
 Every place in one process shares one store per folder (`store_for`), so
 the counts never overwrite each other. A hint that teaches something the
 screen already says in a fixed label is not a hint (the Build pane's
@@ -83,10 +87,21 @@ HINTS = {
         "en": "The recipe stays in the chat, with the answer",
         "es": "La receta queda en el chat, con la respuesta",
     },
+    "ask_screen": {  # the footer line's place too, before pad_ask; {ask} from info.keys like the others
+        "pt": "Pergunte \"o que é isso?\" com {ask}: eu olho a sua tela",
+        "en": "Ask \"what is this?\" with {ask}: I look at your screen",
+        "es": "Pregunta \"¿qué es esto?\" con {ask}: miro tu pantalla",
+    },
     "pad_ask": {  # in the footer line's place, under the tiles (owner 2026-11-25: never over the labels)
         "pt": "Segure {pad} no controle e pergunte",
         "en": "Hold {pad} on the controller to ask",
         "es": "Mantén {pad} en el mando y pregunta",
+    },
+    # the chat: a typed turn goes without the screen (client/main.py captures only for the key and the mic)
+    "typed_no_screen": {
+        "pt": "Digitando eu não vejo o jogo. Pra eu olhar a tela, pergunte com {ask}",
+        "en": "Typed, I can't see the game. To have me look at the screen, ask with {ask}",
+        "es": "Escribiendo no veo el juego. Para que mire la pantalla, pregunta con {ask}",
     },
 }
 NO_AGAIN = {"pt": "não mostrar de novo", "en": "don't show again", "es": "no mostrar de nuevo"}

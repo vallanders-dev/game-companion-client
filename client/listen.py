@@ -248,6 +248,69 @@ SMART_TURN_CHECKS = (1.0, 1.5)
 SMART_TURN_MIN_TAKE = 1.0  # seconds of audio before the model is asked at all
 SMART_TURN_THRESHOLD = 0.90  # surer than turn_detect.THRESHOLD (0.85), see above
 LAST_STOP_SECONDS: float | None = None  # elapsed audio when the last take stopped (tests/telemetry)
+LAST_STOP_REASON = ""  # the "parou por ..." text of the last take (tests/telemetry)
+
+# Speed step 3 (2026-11-26): the wait after the last word is the biggest wait
+# left (~1.5 s typical with the model). With live words the take's own text
+# says when the question reads as finished - the transcriber's own "?" or "!"
+# at the end, or a closing tag ("...né?", "...right?", "...¿verdad?") - and only
+# then the model is asked earlier, at DONE_CHECK, with the same 0.90 bar. An
+# opener alone ("Ei, Ombri", "Hey Ombri, help me here", "Oye, una pregunta")
+# is never a finished question: the model is not asked at all on it (the
+# fixed wait still ends it), so a breath after the address no longer cuts.
+# ends_mid_thought() wins over both; no live words = the timings above.
+# Hard rule (owner, 0.1.20): stops at a pause the player talks on after may
+# not rise - eval/turn_cut_probe.py (`--grid`) measures it on the real
+# recordings; eval/client_turn_end_harness.py replays the loop on synthetic
+# takes with word timings.
+DONE_CHECK = 0.6  # seconds of silence at which a finished-looking take goes to the model
+DONE_MIN_WORDS = 2  # words after the opener for a "?" to count ("Ombri?" is a call, not a question)
+DONE_MARKS = "?!"  # the transcriber's end marks that say "finished" (a "." is a statement: not here)
+DONE_BY_SHAPE = False  # also "a question word + 4 words" with no mark (replayable in the probe)
+DONE_SHAPE_MIN_WORDS = 4
+# Openers and addresses, accent-folded, 1-4 words; a leading run of them is
+# not part of the question. Transcriber mishearings of the name included.
+_OPENERS = {
+    "pt": ("ei", "oi", "ola", "o", "oh", "opa", "e ai", "eai", "fala", "fala ai", "entao", "bom", "ok", "okay", "ta",
+           "ta bom", "beleza", "escuta", "escuta aqui", "escuta so", "olha", "olha so", "olha aqui", "ve so", "ombri",
+           "ombre", "ombrie", "umbri", "umbreon", "aubrey", "ambri", "me ajuda", "me ajuda aqui", "me ajuda ai",
+           "ajuda", "ajuda aqui", "uma pergunta", "pergunta", "pergunta rapida", "rapidinho", "rapidao",
+           "deixa eu te perguntar", "deixa eu perguntar", "deixa eu te perguntar uma coisa", "vem ca", "por favor",
+           "pfv", "aqui", "ai", "cara", "mano", "velho", "amigo", "amiga", "po", "poxa", "hum", "hmm", "ahn", "eh",
+           "ah", "ue", "entao assim", "assim", "pera", "perai", "calma", "calma ai"),
+    "en": ("hey", "hi", "hello", "yo", "ok", "okay", "so", "well", "um", "uh", "hmm", "oh", "ah", "alright", "all right",
+           "right", "listen", "look", "ombri", "umbreon", "aubrey", "ombre", "hombre", "ambry", "help me",
+           "help me out", "help me here", "help", "quick question", "a question", "question", "one question",
+           "real quick", "let me ask you", "let me ask you something", "let me ask", "can i ask you something",
+           "i have a question", "i got a question", "please", "here", "dude", "man", "bro", "buddy", "mate",
+           "wait", "hold on", "hang on"),
+    "es": ("hola", "oye", "oe", "ey", "eh", "este", "bueno", "ok", "okay", "vale", "a ver", "mira", "escucha",
+           "ombri", "umbreon", "aubrey", "ombre", "hombre", "ayudame", "ayudame aqui", "ayuda", "una pregunta",
+           "pregunta", "pregunta rapida", "rapidito", "rapido", "dejame preguntarte", "dejame preguntarte algo",
+           "te puedo preguntar algo", "tengo una pregunta", "por favor", "porfa", "aqui", "amigo", "amiga", "wey",
+           "guey", "tio", "che", "pana", "espera", "esperate"),
+}
+_OPENER_MAX_WORDS = 5
+# Closing tags that end a question even when the transcriber wrote no "?".
+# A tag the open list holds ("né", "sabe": fillers mid-sentence too) counts
+# only with the transcriber's "?" - ends_mid_thought() wins without it.
+_CLOSINGS = {
+    "pt": ("nao e", "num e", "certo", "entendeu", "sacou", "ta ligado", "viu", "nao"),
+    "en": ("right", "okay", "correct", "isn t it", "or not", "or what", "no"),
+    "es": ("verdad", "cierto", "o no", "o que", "vale", "si", "no"),
+}
+# Question starts for the shape rule (DONE_BY_SHAPE): the core begins with one
+# of these and has DONE_SHAPE_MIN_WORDS words or more.
+_QUESTION_STARTS = {
+    "pt": ("como", "onde", "cade", "qual", "quais", "quanto", "quanta", "quantos", "quantas", "quem", "quando",
+           "por que", "porque", "o que", "que", "pra que", "para que", "sera que", "tem como", "da pra", "da para",
+           "consigo", "posso", "preciso", "devo", "vale a pena", "tem", "e", "existe", "voce sabe", "sabe"),
+    "en": ("how", "where", "what", "which", "who", "when", "why", "can", "could", "should", "is", "are", "do",
+           "does", "did", "will", "would", "am i", "any idea", "is there", "do i", "have i", "has", "have"),
+    "es": ("como", "donde", "que", "cual", "cuales", "cuanto", "cuanta", "cuantos", "cuantas", "quien", "cuando",
+           "por que", "para que", "hay", "puedo", "tengo que", "debo", "se puede", "me conviene", "sabes",
+           "existe", "es", "esta"),
+}
 
 # With live words (0.1.19, server/live_stt.py) - owner, 2026-10-20: "Ombri's wait
 # ... slightly shorter, about 30%", and "Ombri cut my voice while I was using
@@ -315,6 +378,79 @@ def ends_mid_thought(text: str, language: str = "pt") -> bool:
     return tail1 in endings or tail2 in endings or tail3 in endings
 
 
+def _fold_words(text: str) -> list[str]:
+    """Lower-case, accents off, punctuation out: the words as ends_mid_thought sees them."""
+    import unicodedata
+    folded = "".join(c for c in unicodedata.normalize("NFKD", (text or "").lower()) if not unicodedata.combining(c))
+    return "".join(c if c.isalnum() else " " for c in folded).split()
+
+
+def _strip_openers(words: list[str], language: str, both_ends: bool = False) -> list[str]:
+    """The words after the leading run of openers and addresses - and before
+    the trailing one too with `both_ends` ("Me ajuda aqui, Ombri")."""
+    openers = _OPENERS.get(language) or _OPENERS["pt"]
+
+    def lead(seq: list[str]) -> int:
+        i = 0
+        while i < len(seq):
+            for n in range(min(_OPENER_MAX_WORDS, len(seq) - i), 0, -1):
+                if " ".join(seq[i:i + n]) in openers:
+                    i += n
+                    break
+            else:
+                break
+        return i
+
+    words = words[lead(words):]
+    if both_ends:
+        while words:
+            for n in range(min(_OPENER_MAX_WORDS, len(words)), 0, -1):
+                if " ".join(words[-n:]) in openers:
+                    words = words[:-n]
+                    break
+            else:
+                break
+    return words
+
+
+def opener_only(text: str, language: str = "pt") -> bool:
+    """True when the live words so far are only an opener or an address
+    ("Ei, Ombri", "Hey Ombri, quick question", "Me ajuda aqui, Ombri") - not
+    a question yet."""
+    words = _fold_words(text)
+    return bool(words) and not _strip_openers(words, language, both_ends=True)
+
+
+def question_done(text: str, language: str = "pt", marks: str = DONE_MARKS, shape: bool = DONE_BY_SHAPE) -> bool:
+    """True when the live words so far read as a finished question or request:
+    the transcriber's end mark (`marks`) or a closing tag after at least
+    DONE_MIN_WORDS words beyond the opener; with `shape`, also a question word
+    opening a core of DONE_SHAPE_MIN_WORDS words or more with no mark at all.
+    Never while ends_mid_thought() holds (a filler or a connective last)."""
+    raw = (text or "").strip()
+    if not raw or ends_mid_thought(raw, language):
+        return False
+    head = _strip_openers(_fold_words(raw), language)  # the closing tag may itself be an opener word ("okay")
+    core = _strip_openers(head, language, both_ends=True)
+    if len(core) < DONE_MIN_WORDS:
+        return False
+    if raw.endswith(tuple(marks)):
+        return True
+    closings = _CLOSINGS.get(language) or _CLOSINGS["pt"]
+    if " ".join(head[-3:]) in closings or " ".join(head[-2:]) in closings or head[-1] in closings:
+        return True
+    if shape and len(core) >= DONE_SHAPE_MIN_WORDS:
+        starts = _QUESTION_STARTS.get(language) or _QUESTION_STARTS["pt"]
+        return any(" ".join(core[:n]) in starts for n in (3, 2, 1))
+    return False
+
+
+def _live_says(live, name: str) -> bool:
+    """A live object's word-level verdict; an older object without it says no."""
+    fn = getattr(live, name, None)
+    return bool(fn()) if callable(fn) else False
+
+
 def record_until_silence(
     *,
     silence_hang: float = 2.5,
@@ -362,7 +498,11 @@ def record_until_silence(
     streamed to the server for live transcription), ``ok`` and
     ``open_ended()`` (the words so far end mid-thought - ends_mid_thought()).
     While it works the waits are LIVE_* (30% shorter) and an open-ended take
-    is held up to HOLD_SILENCE instead of being stopped.
+    is held up to HOLD_SILENCE instead of being stopped. Since speed step 3
+    (2026-11-26) also ``question_done()`` (the words read as a finished
+    question: the model is asked at DONE_CHECK already) and ``opener_only()``
+    (an address alone: the model is not asked); an object without them, or
+    one that fails, keeps the timings above.
 
     ``on_speech`` (2026-11-26): called once, on the recording thread, the first
     time a block counts as speech - before ``live`` sees it. The app sends the
@@ -411,7 +551,7 @@ def record_until_silence(
     if smart_turn:
         from client import turn_detect
         turn_model = turn_detect.get_model()
-    next_check = 0  # index into SMART_TURN_CHECKS; back to 0 whenever speech resumes
+    last_check = -1.0  # the latest check point (seconds of silence) the model was asked at in this pause
 
     try:
         with stream:
@@ -460,7 +600,7 @@ def record_until_silence(
                     speech_detected = speech_detected or speech_time >= min_speech_onset
                     silence_run = 0.0
                     last_speech_end_sample = elapsed_samples
-                    next_check = 0
+                    last_check = -1.0
                 else:
                     silence_run += _BLOCK_SECONDS
 
@@ -478,17 +618,25 @@ def record_until_silence(
                         live_on = bool(live.ok)
                     except Exception:  # noqa: BLE001 - live words are a bonus, never the recording
                         live = None
-                checks = LIVE_SMART_TURN_CHECKS if live_on else SMART_TURN_CHECKS
+                checks = plain = LIVE_SMART_TURN_CHECKS if live_on else SMART_TURN_CHECKS
                 hang = silence_hang * LIVE_SILENCE_FACTOR if live_on else silence_hang
-                held = False
-                if live_on and silence_run >= checks[0]:
+                held = done = opener = False
+                # the words are read from the earliest check on, every block: a late
+                # partial can still open the thought (hold), finish it, or leave an opener
+                if live_on and silence_run >= min(DONE_CHECK, checks[0]):
                     try:
                         held = bool(live.open_ended())
+                        if not held:
+                            done = _live_says(live, "question_done")
+                            opener = not done and _live_says(live, "opener_only")
                     except Exception:  # noqa: BLE001
-                        held = False
+                        held = done = opener = False
                     if held:
                         hang = max(hang, HOLD_SILENCE)
                         hold_reason = " (segurou: frase em aberto)"
+                if done and DONE_CHECK < plain[0]:
+                    checks = (DONE_CHECK,) + tuple(plain)  # the finished question: asked earlier
+                due = next((c for c in checks if c > last_check), None)
 
                 # Not while speech is still building toward the onset: a
                 # sentence started just before the timeout isn't cut off.
@@ -497,24 +645,24 @@ def record_until_silence(
                     if start_tone:
                         print(f"  (nada falado em {elapsed:.1f}s)")
                     return None
-                if (turn_model is not None and speech_detected and not held
+                if (turn_model is not None and speech_detected and not held and not opener
                         and elapsed >= max(min_duration, SMART_TURN_MIN_TAKE + silence_run)
-                        and next_check < len(checks)
-                        and silence_run >= checks[next_check]):
-                    next_check += 1
+                        and due is not None and silence_run >= due):
+                    last_check = due
                     try:
                         p_done = turn_model.probability(np.concatenate(blocks))
                     except Exception:  # noqa: BLE001 - a model error = the fixed wait
                         p_done, turn_model = 0.0, None
                     if p_done >= SMART_TURN_THRESHOLD:
-                        stop_reason = f"fim de fala ({silence_run:.1f}s, p={p_done:.2f}){hold_reason}"
+                        early = " (pergunta completa)" if done and silence_run < plain[0] else ""
+                        stop_reason = f"fim de fala ({silence_run:.1f}s, p={p_done:.2f}){early}"
                         break
                 if (
                     speech_detected
                     and elapsed >= min_duration
                     and silence_run >= hang
                 ):
-                    stop_reason = f"{hang:.1f}s de silêncio{hold_reason}"
+                    stop_reason = f"{hang:.1f}s de silêncio{hold_reason if held else ''}{' (só a chamada)' if opener else ''}"
                     break
                 if elapsed >= max_duration:
                     stop_reason = f"limite de {max_duration:.0f}s atingido"
@@ -526,8 +674,9 @@ def record_until_silence(
     # Always visible, regardless of outcome: this is the fastest way to tell
     # "the mic cut me off early" (short elapsed, stopped by silence) from
     # "I never got heard at all" from a genuinely long, complete take.
-    global LAST_STOP_SECONDS
+    global LAST_STOP_SECONDS, LAST_STOP_REASON
     LAST_STOP_SECONDS = round(elapsed, 2)
+    LAST_STOP_REASON = stop_reason
     print(f"  (gravação: {elapsed:.1f}s, parou por {stop_reason})")
     if not blocks or not speech_detected:
         return None

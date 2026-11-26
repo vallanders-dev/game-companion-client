@@ -235,12 +235,22 @@ class RecipeStrip(QWidget):
                (28, True, 72, False, False), (28, True, 56, False, False), (28, True, 56, True, False),
                (28, True, 72, True, True), (28, True, 56, True, True), (28, True, 44, True, True),
                (28, True, 34, True, True))
+    # With a height limit too (`max_h`: the overlay, whose layer is the key tiles' row
+    # +-8 px and clips its child): every extra line costs ~22 px, so narrower chips with
+    # the modifiers kept on one line come before any split (2026-11-26, Arena: with no
+    # icons yet the overlay strips were 116-147 px tall in an 89 px layer, the last
+    # modifier row cut in half). The chat has no height limit and keeps LAYOUTS.
+    # A wrapped chain (six steps) ends its second line with the result: two lines, not three.
+    SHORT_LAYOUTS = (LAYOUTS[:6] + ((28, True, 44, False, False), (28, True, 34, False, False)) + LAYOUTS[6:]
+                     + ((28, False, 56, False, True), (28, False, 44, False, True), (28, False, 34, False, True)))
 
-    def __init__(self, card: dict, glass: bool = True, max_w: int = STRIP_MAX_W) -> None:
+    def __init__(self, card: dict, glass: bool = True, max_w: int = STRIP_MAX_W, max_h: int | None = None) -> None:
         super().__init__()
         self.card = card
         self.glass = glass
         self.max_w = max_w
+        self.max_h = max_h if max_h and max_h > 0 else None
+        self.mods_shown = True  # False: the overlay had no room for the modifiers' row (the chat keeps them)
         self.steps: list[_Step] = []
         self.mod_steps: list[_Step] = []
         self.icon_px = ICON_PX
@@ -324,6 +334,8 @@ class RecipeStrip(QWidget):
         # the modifiers that change the potion itself (the chain already shows one that was asked)
         in_chain = {s["icon"] for s in card["steps"]}
         mods = [m for m in card["modifiers"] if m["icon"] in ("redstone", "glowstone_dust") and m["icon"] not in in_chain]
+        if not self.mods_shown:
+            mods = []
         if result_below or mods:
             mrow = QHBoxLayout()
             mrow.setContentsMargins(0, 0, 0, 0)
@@ -360,12 +372,34 @@ class RecipeStrip(QWidget):
                 child.show()
 
     def _fit(self) -> None:
-        """The first layout that fits `max_w`; the name is elided as a last resort."""
-        for icon_px, below, chip_max, split, chain_split in self.LAYOUTS:
-            self._build(icon_px, below, chip_max, split, chain_split)
+        """The first layout that fits `max_w` (and `max_h`, when there is one);
+        the name is elided as a last resort. When nothing fits the height, the
+        shortest layout that fits the width."""
+        layouts = self.SHORT_LAYOUTS if self.max_h else self.LAYOUTS
+        # With a height limit and nothing that fits it (all icons still text chips, a long
+        # chain), the overlay leaves the modifiers out rather than be clipped: the chat's
+        # strip keeps them, and `recipe_in_chat` says the recipe stays there.
+        fallback = None  # (height, mods shown, layout): the shortest that fits the width
+        for mods_shown in ((True, False) if self.max_h else (True,)):
+            self.mods_shown = mods_shown
+            for layout in layouts:
+                self._build(*layout)
+                self.adjustSize()
+                hint = self.sizeHint()
+                if hint.width() > self.max_w:
+                    continue
+                if self.max_h is None or hint.height() <= self.max_h:
+                    fallback = None
+                    break
+                if fallback is None or hint.height() < fallback[0]:
+                    fallback = (hint.height(), mods_shown, layout)
+            else:
+                continue
+            break
+        if fallback is not None:
+            self.mods_shown = fallback[1]
+            self._build(*fallback[2])
             self.adjustSize()
-            if self.sizeHint().width() <= self.max_w:
-                break
         hint = self.sizeHint()
         if hint.width() > self.max_w:
             over = hint.width() - self.max_w
@@ -430,7 +464,8 @@ class RecipeOverlay(QWidget):
     def show_recipe(self, card: dict, show_ms: int = SHOW_MS) -> None:
         self._drop()
         self.card = card
-        self.strip = RecipeStrip(card, glass=True)
+        # the layer clips its child: the strip is told how tall it may be (None before any geometry)
+        self.strip = RecipeStrip(card, glass=True, max_h=self.height() if self.height() > 40 else None)
         self.strip.setParent(self)
         self._place()
         self.strip.show()
@@ -463,6 +498,9 @@ class RecipeOverlay(QWidget):
             self._place()
 
     def resizeEvent(self, event) -> None:  # noqa: N802
+        if self.strip is not None and self.height() > 40 and self.strip.max_h != self.height():
+            self.strip.max_h = self.height()  # a new layer height: the strip picks its layout again
+            self.strip._fit()
         self._place()
         super().resizeEvent(event)
 

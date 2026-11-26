@@ -184,6 +184,14 @@ class LiveTranscript:
         from client.listen import ends_mid_thought
         return ends_mid_thought(self.text, self.language)
 
+    def question_done(self) -> bool:  # speed step 3: the words read as a finished question
+        from client.listen import question_done
+        return question_done(self.text, self.language)
+
+    def opener_only(self) -> bool:  # an address alone ("Ei, Ombri"): not a question yet
+        from client.listen import opener_only
+        return opener_only(self.text, self.language)
+
     def finish(self, timeout: float = 2.5) -> str | None:
         """Ends the take; the final text, or None (not started / failed -
         send the WAV)."""
