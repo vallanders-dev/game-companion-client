@@ -29,7 +29,8 @@ Contextual hints (client/gui/hints.py, 2026-11-25): the window owns the
 shared `coach` (one hints.json with the in-game pane) and lends it to the
 chat. Its own moments: the footer line's place, one at a time - the first
 game on the card at "Pronto" (`ask_screen`), then the controller's tile
-(`pad_ask`) -, the brewing strip on the home column with the chat closed
+(`pad_ask`), and the first word of an F8 question (`ask_again`, speed step
+4a) -, the brewing strip on the home column with the chat closed
 (`recipe_in_chat`), "Minhas notas" with notes in it (`note_recall`).
 """
 from __future__ import annotations
@@ -861,9 +862,26 @@ class MainWindow(QWidget):
         super().showEvent(event)
         QTimer.singleShot(0, self._teach)
 
+    def heard(self) -> None:
+        """main.py heard the first word of an F8 question (speed step 4a,
+        2026-11-26): the take now waits on the silence - or on a second press
+        of the key, which ends it at once. `ask_again` says so where the player
+        is looking: under the chat's "Ouvindo…" row when the chat is open, else
+        in the footer line's place of the status page (never over a label, one
+        hint at a time). Not while another hint holds the place; gone the moment
+        the state leaves "ouvindo" (see set_state)."""
+        if self.state != "ouvindo":
+            return
+        if self.chat_open and self.chat._teach("ask_again"):
+            return
+        if self._home_shown() and not self._footer_lent and not self.recipe.active:
+            self._lend_footer("ask_again")
+
     def set_state(self, state: str) -> None:
         self.state = state
         self.chat.set_state(state)
+        if state != "ouvindo":
+            self.coach.hide("ask_again")  # the take ended: pressing the key now would interrupt, not send
         self._refresh()
 
     def set_connection(self, conn: str) -> None:

@@ -182,18 +182,96 @@ def _mic_busy():
             voice.set_mode(previous)
 
 
-def _record(settings, live=None, on_speech=None) -> bytes | None:
+def _record(settings, live=None, on_speech=None, finish=None, on_pause=None) -> bytes | None:
     with _mic_busy():
-        return _record_now(settings, live, on_speech)
+        return _record_now(settings, live, on_speech, finish, on_pause)
 
 
-def _record_now(settings, live=None, on_speech=None) -> bytes | None:
+def _record_now(settings, live=None, on_speech=None, finish=None, on_pause=None) -> bytes | None:
     return record_until_silence(
         silence_hang=settings.mic_silence_hang, max_duration=settings.mic_max_duration,
         min_duration=settings.mic_min_duration, vad_threshold=settings.mic_vad_threshold,
         speech_pad_ms=settings.mic_speech_pad_ms, no_speech_timeout=settings.mic_no_speech_timeout,
-        smart_turn=getattr(settings, "smart_turn", True), live=live, on_speech=on_speech,
+        smart_turn=getattr(settings, "smart_turn", True), live=live, on_speech=on_speech, finish=finish,
+        on_pause=on_pause,
     )
+
+
+def _speculate_on_pause(speculator, live):
+    """Speed step 4b (2026-11-26, owner): the answer starts during the pause.
+    The `on_pause` callable for listen.record_until_silence(): at the take's
+    first short pause the live words so far go to the server (client/net.py
+    Speculator, which the server offers only while its SPECULATE_ANSWERS is
+    on); speech after it takes them back. None - today's path - without live
+    words (LIVE_WORDS=false, the player's own key as ears) or a server that
+    doesn't offer it."""
+    if speculator is None or live is None:
+        return None
+
+    def hook(paused: bool) -> None:
+        if paused:
+            speculator.send(live.text)
+            # a word still landing during the pause (the live STT runs a little
+            # behind the voice) replaces the words sent - the question will have it
+            live.on_text = speculator.send
+        else:
+            live.on_text = None
+            speculator.cancel()
+
+    return hook
+
+
+# A second press counts only after its trigger was quiet this long (2026-11-26). The
+# gamepad combo is level-triggered (client/gamepad.py sets its flag on every 50 ms poll
+# while the buttons are held) and the pad hint says "Segure BACK+LB e pergunte": a player
+# still holding the combo when they start talking would end the take at the first word.
+# The keyboard hook fallback re-fires a held key every DEDUPE_SECONDS (0.4 s) too. So a
+# press counts only when the same trigger reported nothing for RELEASE_GAP before it - a
+# held combo or key never does, a new press after letting go does.
+RELEASE_GAP = 0.5
+
+
+def _finish_on_press(triggers: list, clock=time.monotonic):
+    """Speed step 4a (2026-11-26, owner): a second press while the take runs
+    ends it now - the WAV goes as if the silence had run out. The `finish`
+    callable for listen.record_until_silence(): True on a NEW press of any of
+    `triggers` (F8, the gamepad combo, the chat's mic; F6 too in a note take):
+    one that comes after the trigger was quiet for RELEASE_GAP. The press is
+    consumed either way, so a stale one never starts a turn later; one
+    before any speech is dropped (today's behaviour). The take's start counts
+    as a press of every trigger (the key or combo that started it may still
+    be down)."""
+    for trigger in triggers:
+        trigger.clear()
+    start = clock()
+    last_seen = {id(trigger): start for trigger in triggers}
+
+    def pressed() -> bool:
+        now = clock()
+        fresh = False
+        for trigger in triggers:
+            if trigger.pressed():
+                trigger.clear()
+                if now - last_seen[id(trigger)] >= RELEASE_GAP:
+                    fresh = True
+                last_seen[id(trigger)] = now
+        return fresh
+
+    return pressed
+
+
+def _speech_heard(early):
+    """The first spoken word of an F8 question: the frame goes ahead (EarlyFrame,
+    when there is one) and the window hears of it - its hint says the take can be
+    ended with a second press (client/gui/hints.py `ask_again`)."""
+    def hook() -> None:
+        try:
+            _UI.heard()
+        finally:
+            if early is not None:
+                early.send()
+
+    return hook
 
 
 def _live(session, settings) -> LiveTranscript | None:
@@ -561,9 +639,10 @@ def _typed_note(session: ServerSession, game: str, text: str) -> None:
         print(t("note_discarded", reason=result.get("stats", {}).get("reason", "")))
 
 
-def _remember_note(session: ServerSession, settings, game: str, barge: "BargeInWatcher | None"):
+def _remember_note(session: ServerSession, settings, game: str, barge: "BargeInWatcher | None", finish=None):
     """The F6 flow - see `client.net.ServerSession.remember()`'s docstring
     for the `on_state("ouvindo")` -> record -> `turn_continue` protocol.
+    `finish`: the second-press ender for the note's take (_finish_on_press).
     Returns a trigger pressed during the closing line (the loop's next
     command), or None."""
     print(t("noting", game=game))
@@ -574,7 +653,7 @@ def _remember_note(session: ServerSession, settings, game: str, barge: "BargeInW
     # the player's own key: the note never reaches our STT (a server that takes the note as words)
     own_ears = own_voice.settings_for("ears") if session.supports("text_only") else None
     live = None if own_ears else _live(session, settings)
-    wav = _record(settings, live)
+    wav = _record(settings, live, finish=finish)
     live_id = _live_result(live, wav)
     _UI.state("pensando")
     note_text = None
@@ -1052,6 +1131,7 @@ def cmd_ask(_args: argparse.Namespace) -> int:
     remember_manager = HotkeyManager(settings.remember_hotkey)
     gamepad = GamepadWatcher(settings.gamepad_combo)
     all_triggers = [manager, remember_manager, _CHAT, _CHAT.mic] + ([gamepad] if gamepad.available else [])
+    press_enders = [manager, _CHAT.mic] + ([gamepad] if gamepad.available else [])  # a second press ends a take (4a)
 
     print(t("hotkey_ask", key=_fmt(manager.hotkey)))
     print(t("hotkey_note", key=_fmt(remember_manager.hotkey)))
@@ -1306,11 +1386,15 @@ def cmd_ask(_args: argparse.Namespace) -> int:
                 active_game = game = resolved
                 no_game = False
                 _adopt_spoken_game(resolved, is_freeform, recap)
-            pending_fired = _remember_note(session, settings, game, barge)
+            pending_fired = _remember_note(session, settings, game, barge,
+                                           finish=_finish_on_press([remember_manager] + press_enders))
             print("-" * 48)
             continue
 
         used_trigger = fired is not None
+        # keyboard / xbox / playstation / switch / controller: with the question, and
+        # with the words sent ahead of it (the answer's button names depend on it)
+        controls = gamepad.input_kind(from_pad=fired is gamepad) if gamepad.available else "keyboard"
         live_id = None  # this question's words, heard live (no WAV upload)
         from_wake = False
         heard_in_window = False  # this question came from the follow-up window, no key pressed
@@ -1321,6 +1405,7 @@ def cmd_ask(_args: argparse.Namespace) -> int:
         wav = None
         turn_id = uuid.uuid4().hex  # before the capture: the frame can travel ahead of the question under it
         early = None  # the frame sent at the first spoken word (client/net.py EarlyFrame), when it was
+        speculator = None  # the live words sent at the first pause (client/net.py Speculator), when they were
         if used_trigger:
             print(t("capturing"))
             screenshot, no_screen_reason = _capture_for_turn(settings)
@@ -1347,7 +1432,16 @@ def cmd_ask(_args: argparse.Namespace) -> int:
                 # says the frame is there. A silent take sends nothing; a server that
                 # doesn't know the message (None here) gets the frame with the question.
                 early = session.early_frame(turn_id, game, screenshot)
-                wav = _record(settings, live, on_speech=early.send if early is not None else None)
+                # The live words so far go to the server at the first short pause (speed
+                # step 4b), with what the question will carry, so the search and the answer
+                # start then; the turn uses them only if the final words are the same.
+                speculator = session.speculator(
+                    turn_id, game, controls=controls, shows_cards=True, guide=_guide_field(),
+                    game_context=_game_context_field(game), visual=_visual_field(),
+                    no_screen_reason=no_screen_reason if screenshot is None else "")
+                # a second press (F8, the pad, the chat's mic) ends the take now (speed step 4a)
+                wav = _record(settings, live, on_speech=_speech_heard(early), finish=_finish_on_press(press_enders),
+                              on_pause=_speculate_on_pause(speculator, live))
                 live_id = _live_result(live, wav)
                 _UI.state("pensando" if wav else "idle")
                 if wav and own_ears:
@@ -1371,6 +1465,8 @@ def cmd_ask(_args: argparse.Namespace) -> int:
         if not wav and not question_text:
             if early is not None:
                 early.cancel()  # words were heard but nothing came of them: the server drops the read
+            if speculator is not None:
+                speculator.cancel()  # ...and the answer it may have started
             print(t("empty_question"))
             continue
 
@@ -1478,7 +1574,7 @@ def cmd_ask(_args: argparse.Namespace) -> int:
                 wake=from_wake, record_reply=record_reply if wav or typed_chat or spoken_text else None,
                 follow_up=heard_in_window, only_if_report=probe_turn,
                 text_only=(typed_chat or speaker is not None) and session.supports("text_only"),
-                controls=gamepad.input_kind(from_pad=fired is gamepad) if gamepad.available else "keyboard",
+                controls=controls,
                 cancel=cancel, on_state=on_state, on_meta=on_meta, on_text=on_text, on_cards=on_cards, on_audio=on_audio,
                 on_usage=_UI.usage, play_history=history_sent, play_history_unasked=play_history.unasked(),
                 guide=_guide_field(), on_guide=_apply_guide_message,

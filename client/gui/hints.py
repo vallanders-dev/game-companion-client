@@ -22,6 +22,10 @@ after the pane's own three):
   state is "Pronto" (everyone: the screen is the product's trick and nothing
   on the window says the key sends it), then pad_ask the next time the
   status page shows (controller owners). Owner's yes to both, 2026-11-26.
+  ask_again (speed step 4a, owner 2026-11-26) when the first word of an F8
+  question is heard: under the chat's "Ouvindo…" row when the chat is open,
+  else the footer line's place; hidden the moment the take ends (its advice
+  would be wrong while Ombri thinks or talks: the key then interrupts).
 Every place in one process shares one store per folder (`store_for`), so
 the counts never overwrite each other. A hint that teaches something the
 screen already says in a fixed label is not a hint (the Build pane's
@@ -96,6 +100,13 @@ HINTS = {
         "pt": "Segure {pad} no controle e pergunte",
         "en": "Hold {pad} on the controller to ask",
         "es": "Mantén {pad} en el mando y pregunta",
+    },
+    # an F8 question being heard (client/main.py `heard`, speed step 4a): a second press ends the take now.
+    # Under the "Ouvindo…" row in the chat, else in the footer line's place; gone when the take ends.
+    "ask_again": {
+        "pt": "Terminou? Aperte {ask} de novo e eu respondo na hora",
+        "en": "Finished? Press {ask} again and I'll answer right away",
+        "es": "¿Terminaste? Presiona {ask} de nuevo y respondo al instante",
     },
     # the chat: a typed turn goes without the screen (client/main.py captures only for the key and the mic)
     "typed_no_screen": {
@@ -403,6 +414,14 @@ class Hints:
             label.hide()
             label.deleteLater()
         self._up.clear()
+
+    def hide(self, hint_id: str) -> None:
+        """This one hint goes now if it is up - its moment passed (the take
+        `ask_again` talks about has ended). Nothing else moves."""
+        label = self._up.pop(hint_id, None)
+        if label is not None:
+            label.hide()
+            label.deleteLater()
 
     @property
     def showing(self) -> list[str]:

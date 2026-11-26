@@ -606,6 +606,8 @@ class Ui:
                 self.window.recipe_icons(msg["icons"])
         elif kind == "chat_stage":
             self.window.chat.set_stage(str(msg.get("stage") or ""))
+        elif kind == "heard":
+            self.window.heard()
         elif kind == "chat_done":
             self.window.chat.turn_done(str(msg.get("outcome") or ""))
         elif kind == "chat_confirm":

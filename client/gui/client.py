@@ -264,6 +264,11 @@ class HudClient:
         """A stage only the client knows ("screen": a screenshot went with the turn)."""
         self._send({"type": "chat_stage", "stage": stage})
 
+    def heard(self) -> None:
+        """The first spoken word of an F8 question (speed step 4a): the window's
+        hint that a second press ends the take now."""
+        self._send({"type": "heard"})
+
     def chat_done(self, outcome: str) -> None:
         """The turn ended; "failed" when the connection dropped."""
         self._send({"type": "chat_done", "outcome": outcome})

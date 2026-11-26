@@ -41,7 +41,7 @@ import webbrowser
 from datetime import date, datetime
 from urllib.parse import urlsplit
 
-from PySide6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QBrush, QColor, QFont, QFontMetrics, QGuiApplication, QImage, QLinearGradient, QPainter, QPainterPath, QPen,
     QPixmap,
@@ -1406,6 +1406,20 @@ class LinksView(QWidget):
 
 
 # ---------------------------------------------------------------------- the chat
+class _RoomForStrip(QObject):
+    """Gives the conversation its bottom margin back when the hint strip hides
+    (timed out, ticked off, replaced). Owned by the strip, dies with it."""
+
+    def __init__(self, strip, on_close) -> None:
+        super().__init__(strip)
+        self.on_close = on_close
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        if event.type() == QEvent.Type.Hide and obj.isHidden():
+            self.on_close()
+        return False
+
+
 class ChatView(QWidget):
     """The whole chat: tab bar, the conversation (or its empty state) with the
     input box, and the Links tab. ui_process / main_window feed it."""
@@ -1455,7 +1469,8 @@ class ChatView(QWidget):
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.host = _ListHost()
         self.list = QVBoxLayout(self.host)
-        self.list.setContentsMargins(4, 8, 6, 12)
+        self._list_margins = (4, 8, 6, 12)
+        self.list.setContentsMargins(*self._list_margins)
         self.list.setSpacing(8)
         self.list.addStretch(1)
         self.scroll.setWidget(self.host)
@@ -1673,11 +1688,33 @@ class ChatView(QWidget):
 
     def _teach(self, hint_id: str) -> bool:
         """A hint along the bottom of the conversation - only while the
-        player can see it (the view shown, the Conversa tab in front)."""
+        player can see it (the view shown, the Conversa tab in front). The
+        last row is not covered: the list gets the strip's height at its
+        bottom while the strip is up (2026-11-26, with `ask_again` over the
+        "Ouvindo…" row), and follows to the bottom."""
         # closed, the chat is clipped to nothing beside the home column, not hidden: ask for the region
         if self.visibleRegion().isEmpty() or self.pages.currentIndex() != 0 or self.body.currentWidget() is not self.scroll:
             return False
-        return self.coach.show(hint_id, self.body, self.lang, ask=self.keys.get("ask", ""))
+        if not self.coach.show(hint_id, self.body, self.lang, ask=self.keys.get("ask", "")):
+            return False
+        strip = self.coach.strip(hint_id)
+        if strip is not None:
+            QTimer.singleShot(0, lambda: self._make_room(strip))  # after the strip's own first placement
+        return True
+
+    def _make_room(self, strip) -> None:
+        try:
+            if strip.isHidden() or strip.leaving:
+                return
+            left, top, right, bottom = self._list_margins
+            self.list.setContentsMargins(left, top, right, bottom + strip.height() + hints_mod.MARGIN)
+            strip.installEventFilter(_RoomForStrip(strip, self._room_back))
+            self._after_growth()
+        except RuntimeError:  # the strip already gone
+            pass
+
+    def _room_back(self) -> None:
+        self.list.setContentsMargins(*self._list_margins)
 
     def add_visual(self, item: dict, image: QImage | None) -> dict:
         """A picture the in-game pane showed (client/gui/game_pane.py): a card

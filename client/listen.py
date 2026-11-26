@@ -264,6 +264,11 @@ LAST_STOP_REASON = ""  # the "parou por ..." text of the last take (tests/teleme
 # recordings; eval/client_turn_end_harness.py replays the loop on synthetic
 # takes with word timings.
 DONE_CHECK = 0.6  # seconds of silence at which a finished-looking take goes to the model
+# Speed step 4b (2026-11-26): the pause at which the words so far go to the
+# server to start the answer early (record_until_silence(on_pause=); client/
+# net.py Speculator). Before DONE_CHECK on purpose: a take the model ends at
+# 0.6 s has its speculation 0.1 s old by then.
+SPECULATE_PAUSE = 0.5
 DONE_MIN_WORDS = 2  # words after the opener for a "?" to count ("Ombri?" is a call, not a question)
 DONE_MARKS = "?!"  # the transcriber's end marks that say "finished" (a "." is a statement: not here)
 DONE_BY_SHAPE = False  # also "a question word + 4 words" with no mark (replayable in the probe)
@@ -465,6 +470,8 @@ def record_until_silence(
     smart_turn: bool = True,
     live=None,
     on_speech=None,
+    finish=None,
+    on_pause=None,
 ) -> bytes | None:
     """Record the mic until it goes quiet, then return WAV bytes.
 
@@ -510,6 +517,23 @@ def record_until_silence(
     runs while the player talks; a silent take sends nothing. Whatever it
     raises is swallowed: the recording never depends on it.
 
+    ``finish`` (speed step 4a, 2026-11-26): a callable polled every block like
+    ``abort``. True once speech has been heard ends the take right there and
+    the WAV comes back as if the silence had run out (the stop cue, the pad
+    past the last speech block) - the player pressed the key again to say
+    "done". Before any speech its True is consumed and nothing happens (the
+    press is dropped, as a press during a take always was); one that raises
+    counts as False. The automatic end is untouched for a player who never
+    presses.
+
+    ``on_pause`` (speed step 4b, 2026-11-26): called on the recording thread
+    with ``True`` once per pause, the moment a pause after speech reaches
+    SPECULATE_PAUSE seconds, and with ``False`` once when speech comes back
+    after that. The app sends the live words so far to the server there
+    (client/net.py Speculator), so the answer starts during the pause, and
+    takes them back when the player talks on. Whatever it raises is
+    swallowed; the recording's own ends are untouched by it.
+
     Returns ``None`` (caller should fall back to typed input) when there is no
     usable input device, the stream errors, Silero VAD can't be loaded, or
     nothing is spoken within ``no_speech_timeout`` seconds.
@@ -552,6 +576,7 @@ def record_until_silence(
         from client import turn_detect
         turn_model = turn_detect.get_model()
     last_check = -1.0  # the latest check point (seconds of silence) the model was asked at in this pause
+    paused = False  # on_pause(True) went out for the current pause (speed step 4b)
 
     try:
         with stream:
@@ -586,6 +611,14 @@ def record_until_silence(
 
                 if abort is not None and abort():
                     return None
+                if finish is not None:
+                    try:
+                        pressed = bool(finish())
+                    except Exception:  # noqa: BLE001 - a key poll failing never ends a take
+                        pressed = False
+                    if pressed and speech_detected:
+                        stop_reason = f"tecla apertada de novo ({elapsed:.1f}s)"
+                        break
 
                 prob = vad_model(mono)
                 if cue_left > 0:
@@ -610,6 +643,22 @@ def record_until_silence(
                         hook()
                     except Exception:  # noqa: BLE001 - the frame is a bonus, never the recording
                         pass
+
+                if on_pause is not None and speech_detected:
+                    # speed step 4b: the first short pause (the app starts the answer on
+                    # the words so far); speech after it takes the words back
+                    if not paused and silence_run >= SPECULATE_PAUSE:
+                        paused = True
+                        try:
+                            on_pause(True)
+                        except Exception:  # noqa: BLE001 - a head start is a bonus, never the recording
+                            pass
+                    elif paused and prob >= vad_threshold:
+                        paused = False
+                        try:
+                            on_pause(False)
+                        except Exception:  # noqa: BLE001
+                            pass
 
                 live_on = False
                 if live is not None:

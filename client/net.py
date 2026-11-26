@@ -98,6 +98,7 @@ class LiveTranscript:
         self.started = False
         self.text = ""
         self.final: str | None = None
+        self.on_text = None  # called with the new text when a partial changes it (speed step 4b: a late word)
         self._early: list[bytes] = []
         self._buf = b""
         self._locked = False
@@ -138,7 +139,13 @@ class LiveTranscript:
             if msg.get("id") != self.id:
                 continue
             if msg.get("type") == "listen_partial":
-                self.text = str(msg.get("text", ""))
+                text = str(msg.get("text", ""))
+                changed, self.text = text != self.text, text
+                if changed and self.on_text is not None:
+                    try:
+                        self.on_text(text)
+                    except Exception:  # noqa: BLE001 - a bonus, never the words
+                        pass
             elif msg.get("type") == "listen_final":
                 self.final = str(msg.get("text", "")) if not msg.get("error") else ""
                 if self.final:
@@ -272,6 +279,77 @@ class EarlyFrame:
             pass
 
 
+class Speculator:
+    """The answer started during the pause (speed step 4b, 2026-11-26;
+    server/app.py `speculate`, "speculate" in auth_ok.features).
+
+    Made at the press for the turn id the question will use, with the fields
+    the answer depends on - what ask() will send: voice, controls, guide,
+    game_context, visual, no_screen_reason, shows_cards. At the first short
+    pause of the take (listen.record_until_silence(on_pause=)) send(words)
+    posts the live words so far (LiveTranscript.text); sent again with other
+    words (a last word landing late in the pause) it first takes the earlier
+    ones back; cancel() takes them back when the player talks on. The server
+    starts the search and the answer right then, speaks nothing, and the turn
+    with that id uses the answer only if the final transcript is the same
+    words - so ask() needs no flag, the turn id is the link, and a server
+    that never heard of it (or LIVE_WORDS off: no words to send) means
+    exactly today's path. At most MAX_PER_TAKE sends per take (the server's
+    own cap), MIN_WORDS words each. Sent on the recording thread, like
+    EarlyFrame: never reconnects there. Never raises."""
+
+    MAX_PER_TAKE = 3
+    MIN_WORDS = 2
+
+    def __init__(self, session: "ServerSession", turn_id: str, game: str, fields: dict | None = None) -> None:
+        self._s = session
+        self.turn_id = turn_id
+        self.game = game
+        self.fields = dict(fields or {})
+        self.sent = 0  # speculations this take
+        self.last = ""  # the words of the one in flight ("" = none)
+        self._gen = -1  # the connection it went on
+
+    def send(self, words: str) -> bool:
+        words = " ".join((words or "").split())
+        if words and words == self.last:
+            return True  # the same words as the one in flight (a pause twice over)
+        if len(words.split()) < self.MIN_WORDS or self.sent >= self.MAX_PER_TAKE:
+            return False
+        ws = self._s._ws
+        if ws is None or not self._s.connected():
+            return False
+        try:
+            with self._s._io_lock:
+                if self.last and self._gen == self._s._gen:
+                    # other words than the ones in flight: those are nobody's now
+                    ws.send(json.dumps({"type": "speculate_cancel", "turn_id": self.turn_id}))
+                ws.send(json.dumps({"type": "speculate", "turn_id": self.turn_id, "game": self.game,
+                                    "words": words[:500], **self.fields}))
+                self._gen = self._s._gen
+        except Exception:  # noqa: BLE001 - a dead connection: the turn's own send reconnects
+            self.last = ""
+            self._s.close()
+            return False
+        self.sent += 1
+        self.last = words
+        return True
+
+    def cancel(self) -> None:
+        """The words changed (the player talked on) or the take came to
+        nothing: the server closes the answer it was making (best effort)."""
+        if not self.last:
+            return
+        self.last = ""
+        if self._gen != self._s._gen or not self._s.connected():
+            return
+        try:
+            with self._s._io_lock:
+                self._s._ws.send(json.dumps({"type": "speculate_cancel", "turn_id": self.turn_id}))
+        except Exception:  # noqa: BLE001 - the server's own timeout drops it then
+            pass
+
+
 class ServerSession:
     def __init__(self, server_url: str, token: str, voice: str | None = None,
                  fallback_urls: tuple[str, ...] = ()) -> None:
@@ -358,6 +436,28 @@ class ServerSession:
         if frame is None or not self.supports("early_frame"):
             return None
         return EarlyFrame(self, turn_id, game, frame)
+
+    def speculator(self, turn_id: str, game: str, **fields) -> "Speculator | None":
+        """The sender of the live words at the take's first pause (Speculator),
+        or None when the server doesn't offer it ("speculate" is advertised
+        only while its SPECULATE_ANSWERS is on). `fields` are what ask() will
+        send with the question (controls, guide, game_context, visual,
+        no_screen_reason, shows_cards); None values are left out, the guide /
+        game_context / visual ones only when the server knows them."""
+        if not self.supports("speculate"):
+            return None
+        clean = dict(self._voice_field())
+        for key, value in fields.items():
+            if value is None or value == "" or value is False:
+                continue
+            if key in ("guide", "build_guide") and not self.supports("build_guide"):
+                continue
+            if key == "game_context" and not self.supports("game_context"):
+                continue
+            if key == "visual" and not self.supports("visual"):
+                continue
+            clean[key] = value
+        return Speculator(self, turn_id, game, clean)
 
     @property
     def http_base(self) -> str:
